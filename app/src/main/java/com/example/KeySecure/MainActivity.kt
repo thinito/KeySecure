@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import javax.crypto.Cipher
 
+
 private val Matte = darkColorScheme(
     primary = Color(0xFF9DB4D6),
     onPrimary = Color(0xFF101418),
@@ -98,9 +99,11 @@ class MainActivity : FragmentActivity() {
             Text("Guarde o texto-chave: ele protege seus dados e não pode ser recuperado.",
                 style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(16.dp))
-            Button({ vault.create(pin, phrase); done() }, enabled = pin.length >= 4 && phrase.length >= 8) { Text("Criar") }
+            Button({ vault.create(pin, phrase); done() }, enabled = pin.length >= 10 && phrase.length >= 10) { Text("Criar") }
         }
     }
+
+    
 
     @Composable fun Lock(done: () -> Unit) {
         var pin by remember { mutableStateOf("") }; var err by remember { mutableStateOf("") }
@@ -116,6 +119,27 @@ class MainActivity : FragmentActivity() {
                     if (vault.unlockBio(c)) done() } }
                 catch (e: Exception) { err = "Biometria indisponível, use o PIN" }
             }) { Text("Usar biometria") }
+        }
+    }
+    @Composable
+    fun UnlockScreen(viewModel: UnlockViewModel) {
+        val state by viewModel.state.collectAsStateWithLifecycle()
+
+        Column {
+            OutlinedTextField(
+                value = state.pin,
+                onValueChange = { viewModel.onPinChange(it) },
+                label = { Text("PIN (mínimo ${SecurityPolicy.MIN_PIN_LENGTH} dígitos)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                visualTransformation = PasswordVisualTransformation(),
+                isError = state.error != null
+            )
+            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+
+            Button(
+                enabled = SecurityPolicy.isValidPin(state.pin) && !state.isLocked,
+                onClick = { viewModel.submitPin() }
+            ) { Text("Desbloquear") }
         }
     }
     @OptIn(ExperimentalMaterial3Api::class)
@@ -155,6 +179,27 @@ class MainActivity : FragmentActivity() {
                 text = { Column { Field(site, "Site/App", hide = false) { site = it }; Field(u, "Usuário", hide = false) { u = it }; Field(p, "Senha") { p = it } } },
                 confirmButton = { TextButton({ vault.add(Entry(site, u, p)); adding = false }, enabled = site.isNotBlank() && p.isNotBlank()) { Text("Salvar") } },
                 dismissButton = { TextButton({ adding = false }) { Text("Cancelar") } })
+        }
+    }
+}
+
+class UnlockViewModel(app: Application) : AndroidViewModel(app) {
+    private val tracker = AttemptTracker(app)
+
+    fun submitPin() {
+        viewModelScope.launch {
+            if (tracker.isLockedOut()) {
+                val secs = tracker.remainingLockoutMs() / 1000
+                _state.update { it.copy(error = "Bloqueado. Tente em ${secs}s") }
+                return@launch
+            }
+            if (vault.unlock(_state.value.pin.toCharArray())) {
+                tracker.reset()
+                // navega para o cofre
+            } else {
+                tracker.registerFailure()
+                _state.update { it.copy(pin = "", error = "PIN incorreto") }
+            }
         }
     }
 }
