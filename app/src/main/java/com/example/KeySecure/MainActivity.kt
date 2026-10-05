@@ -146,7 +146,12 @@ class MainActivity : FragmentActivity() {
     @Composable fun Home(lockNow: () -> Unit) {
         var adding by remember { mutableStateOf(false) }
         var bioOn by remember { mutableStateOf(vault.bioEnabled()) }
-        val clip = LocalClipboardManager.current
+        val clip = ClipboardUtil.copySensitive(
+            context = context,
+            label = "senha",
+            value = entry.pass,
+            scope = rememberCoroutineScope()
+        )
         val shown = remember { mutableStateListOf<Entry>() }
         Scaffold(
             topBar = { TopAppBar(title = { Text("Minhas senhas") }, actions = {
@@ -195,10 +200,13 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (vault.unlock(_state.value.pin.toCharArray())) {
                 tracker.reset()
+                pin.fill('\u0000')
                 // navega para o cofre
             } else {
                 tracker.registerFailure()
                 _state.update { it.copy(pin = "", error = "PIN incorreto") }
+                pin.fill('\u0000')
+
             }
         }
     }
