@@ -1,73 +1,153 @@
 package com.example.KeySecure
 
-import android.content.Context
-import android.util.Base64
-import androidx.compose.runtime.mutableStateListOf
-import org.json.JSONArray
-import org.json.JSONObject
+import com.example.KeySecure.crypto.Crypto
+import com.example.KeySecure.data.SecurityPolicy
+import com.example.KeySecure.data.VaultEnvelope
+import com.example.KeySecure.util.Base64Ext
+import kotlinx.serialization.json.Json
 import java.io.File
-import javax.crypto.Cipher
-
-class Entry(val site: String, val user: String, val pass: String)
+import java.security.SecureRandom
+import javax.crypto.SecretKey
 
 /**
- * vaultKey = PBKDF2(texto-chave). Os dados são cifrados com vaultKey (AES-GCM).
- * A vaultKey fica guardada "embrulhada" de duas formas: pela chave derivada do PIN
- * e pela chave do Keystore (biometria). Nada em texto puro vai para o disco.
+ * Cofre local. Persiste em vault.json com envelope versionado.
  */
-class Vault(ctx: Context) {
-    private val f = File(ctx.filesDir, "vault.json")
-    private var key: ByteArray? = null
-    val entries = mutableStateListOf<Entry>()
+class Vault(private val vaultFile: File) {
 
-    private fun b(s: String) = Base64.decode(s, Base64.NO_WRAP)
-    private fun s(x: ByteArray) = Base64.encodeToString(x, Base64.NO_WRAP)
-    private fun meta() = JSONObject(f.readText())
+    private var keyBytes: ByteArray? = null
 
-    fun exists() = f.exists()
-    fun bioEnabled() = exists() && meta().has("wb")
+    @Volatile
+    var unlocked: Boolean = false
+        private set
 
-    fun create(pin: String, phrase: String) {
-        val sp = Crypto.rand(16); val sn = Crypto.rand(16)
-        val k = Crypto.derive(phrase, sp); key = k
-        f.writeText(JSONObject().put("sn", s(sn))
-            .put("wp", s(Crypto.encrypt(Crypto.derive(pin, sn), k))).toString())
-        save()
-    }
+    private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
 
-    fun unlockPin(pin: String): Boolean = try {
-        val m = meta()
-        key = Crypto.decrypt(Crypto.derive(pin, b(m.getString("sn"))), b(m.getString("wp")))
-        load(); true
-    } catch (e: Exception) { key = null; false }
-
-    fun bioIv(): ByteArray = b(meta().getString("wbi"))
-
-    fun enableBio(c: Cipher) {           // cipher em ENCRYPT_MODE já autenticado
-        val wrapped = c.doFinal(key!!)
-        f.writeText(meta().put("wb", s(wrapped)).put("wbi", s(c.iv)).toString())
-    }
-
-    fun unlockBio(c: Cipher): Boolean = try {
-        key = c.doFinal(b(meta().getString("wb"))); load(); true
-    } catch (e: Exception) { key = null; false }
-
-    fun add(e: Entry) { entries.add(e); save() }
-    fun remove(e: Entry) { entries.remove(e); save() }
-    fun lock() { key = null; entries.clear() }
-
-    private fun save() {
-        val arr = JSONArray()
-        entries.forEach { arr.put(JSONObject().put("s", it.site).put("u", it.user).put("p", it.pass)) }
-        val blob = Crypto.encrypt(key!!, arr.toString().toByteArray())
-        f.writeText(meta().put("d", s(blob)).toString())
-    }
-
-    private fun load() {
-        entries.clear()
-        val arr = JSONArray(String(Crypto.decrypt(key!!, b(meta().getString("d")))))
-        for (i in 0 until arr.length()) arr.getJSONObject(i).let {
-            entries.add(Entry(it.getString("s"), it.getString("u"), it.getString("p")))
+    // ------------------------------------------------------------------
+    // Criação
+    // ------------------------------------------------------------------
+    fun create(pin: CharArray, passphrase: CharArray) {
+        require(SecurityPolicy.isValidPin(String(pin))) { "PIN inválido" }
+        require(SecurityPolicy.isValidPassphrase(String(passphrase))) {
+            "Frase-chave muito curta"
         }
+
+        // 1) Chave mestra aleatória do cofre (32 bytes)
+        val master = Crypto.randomBytes(32)
+
+        // 2) Salts independentes
+        val saltPin = Crypto.randomBytes(SecurityPolicy.SALT_LENGTH_BYTES)
+        val saltPhrase = Crypto.randomBytes(SecurityPolicy.SALT_LENGTH_BYTES)
+
+        // 3) Deriva chaves de embrulho
+        val kPin = Crypto.derive(pin, saltPin)
+        val kPhrase = Crypto.derive(passphrase, saltPhrase)
+
+        // 4) Embrulha a master key com cada uma
+        val wrappedPin = Crypto.encrypt(kPin, master)
+        val wrappedPhrase = Crypto.encrypt(kPhrase, master)
+
+        // 5) Envelope
+        val envelope = VaultEnvelope(
+            version = 2,
+            kdfIterations = SecurityPolicy.PBKDF2_ITERATIONS,
+            saltPin = saltPin.toBase64(),
+            saltPhrase = saltPhrase.toBase64(),
+            wrappedKeyPin = wrappedPin.toBase64(),
+            wrappedKeyPhrase = wrappedPhrase.toBase64(),
+            entries = emptyList()
+        )
+        persist(envelope)
+
+        // 6) Mantém a master key em memória
+        setKey(master)
+
+        // 7) Limpa buffers sensíveis
+        pin.fill('\u0000')
+        passphrase.fill('\u0000')
+        kPin.encoded.fill(0)
+        kPhrase.encoded.fill(0)
     }
+
+    // ------------------------------------------------------------------
+    // Desbloqueio
+    // ------------------------------------------------------------------
+    fun unlockPin(pin: CharArray): Boolean = try {
+        val env = readEnvelope() ?: return false
+        val salt = env.saltPin.base64()
+        val kPin = Crypto.derive(pin, salt, env.kdfIterations)
+        val master = Crypto.decrypt(kPin, env.wrappedKeyPin.base64())
+
+        setKey(master)
+        migrateIfNeeded(pin, master, env)
+        true
+    } catch (t: Throwable) {
+        false
+    } finally {
+        pin.fill('\u0000')
+    }
+
+    fun unlockPhrase(phrase: CharArray): Boolean = try {
+        val env = readEnvelope() ?: return false
+        val salt = env.saltPhrase.base64()
+        val kPh = Crypto.derive(phrase, salt, env.kdfIterations)
+        val master = Crypto.decrypt(kPh, env.wrappedKeyPhrase.base64())
+
+        setKey(master)
+        true
+    } catch (t: Throwable) {
+        false
+    } finally {
+        phrase.fill('\u0000')
+    }
+
+    // ------------------------------------------------------------------
+    // Migração v1 -> v2 (aumento de iterações)
+    // ------------------------------------------------------------------
+    private fun migrateIfNeeded(pin: CharArray, master: ByteArray, env: VaultEnvelope) {
+        if (env.kdfIterations >= SecurityPolicy.PBKDF2_ITERATIONS) return
+        val newSalt = Crypto.randomBytes(SecurityPolicy.SALT_LENGTH_BYTES)
+        val kPin = Crypto.derive(pin, newSalt) // já usa o novo padrão
+        val rewrapped = Crypto.encrypt(kPin, master)
+        persist(
+            env.copy(
+                kdfIterations = SecurityPolicy.PBKDF2_ITERATIONS,
+                saltPin = newSalt.toBase64(),
+                wrappedKeyPin = rewrapped.toBase64()
+            )
+        )
+        kPin.encoded.fill(0)
+    }
+
+    // ------------------------------------------------------------------
+    // Key lifecycle
+    // ------------------------------------------------------------------
+    private fun setKey(bytes: ByteArray) {
+        keyBytes?.fill(0)
+        keyBytes = bytes.copyOf()
+        unlocked = true
+    }
+
+    fun key(): SecretKey {
+        val b = keyBytes ?: error("Cofre trancado")
+        return javax.crypto.spec.SecretKeySpec(b, "AES")
+    }
+
+    fun lock() {
+        keyBytes?.fill(0)
+        keyBytes = null
+        unlocked = false
+    }
+
+    // ------------------------------------------------------------------
+    // Persistência
+    // ------------------------------------------------------------------
+    private fun persist(env: VaultEnvelope) {
+        vaultFile.writeText(json.encodeToString(VaultEnvelope.serializer(), env))
+    }
+
+    private fun readEnvelope(): VaultEnvelope? =
+        if (!vaultFile.exists()) null
+        else runCatching {
+            json.decodeFromString(VaultEnvelope.serializer(), vaultFile.readText())
+        }.getOrNull()
 }

@@ -1,26 +1,38 @@
-object KeyDerivation {
-    // OWASP 2023: 600_000 iterações para PBKDF2-HMAC-SHA256
-    const val ITERATIONS_V1 = 210_000   // valor antigo (vaults existentes)
-    const val ITERATIONS_V2 = 600_000   // novo padrão
-    const val KEY_LENGTH = 256
-    const val SALT_LENGTH = 16
+package com.example.KeySecure.crypto
 
-    fun deriveKey(
+import com.example.KeySecure.data.SecurityPolicy
+import java.security.SecureRandom
+import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
+
+object KeyDerivation {
+
+    private val random = SecureRandom()
+
+    fun randomBytes(size: Int): ByteArray =
+        ByteArray(size).also { random.nextBytes(it) }
+
+    /**
+     * Deriva uma chave AES-256 via PBKDF2-HMAC-SHA256.
+     * Sempre limpa o PBEKeySpec após o uso.
+     */
+    fun derive(
         password: CharArray,
         salt: ByteArray,
-        iterations: Int = ITERATIONS_V2
+        iterations: Int = SecurityPolicy.PBKDF2_ITERATIONS
     ): SecretKey {
-        val spec = PBEKeySpec(password, salt, iterations, KEY_LENGTH)
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val keyBytes = factory.generateSecret(spec).encoded
-        val key = SecretKeySpec(keyBytes, "AES")
-        // limpa buffers
-        spec.clearPassword()
-        keyBytes.fill(0)
-        return key
+        val spec = PBEKeySpec(password, salt, iterations, 256)
+        try {
+            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            val bytes = factory.generateSecret(spec).encoded
+            return SecretKeySpec(bytes, "AES").also {
+                // Zera a cópia intermediária
+                bytes.fill(0)
+            }
+        } finally {
+            spec.clearPassword()
+        }
     }
-
-    fun randomSalt(): ByteArray = ByteArray(SALT_LENGTH).also {
-        SecureRandom().nextBytes(it)
-    }
-}   
+}

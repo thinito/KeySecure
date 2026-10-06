@@ -1,11 +1,8 @@
-package com.example.KeySecure
+package com.example.KeySecure.crypto
 
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import java.security.KeyStore
+import com.example.KeySecure.data.SecurityPolicy
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -13,46 +10,52 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 object Crypto {
-    private val rnd = SecureRandom()
-    fun rand(n: Int) = ByteArray(n).also { rnd.nextBytes(it) }
 
-    // Texto/PIN -> chave AES-256 (PBKDF2)
-    fun derive(secret: String, salt: ByteArray): ByteArray =
-        SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            .generateSecret(PBEKeySpec(secret.toCharArray(), salt, 210_000, 256)).encoded
+    private val random = SecureRandom()
 
-    fun encrypt(key: ByteArray, data: ByteArray): ByteArray {
-        val iv = rand(12)
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
-        return iv + c.doFinal(data)
+    fun randomBytes(size: Int): ByteArray =
+        ByteArray(size).also { random.nextBytes(it) }
+
+    /**
+     * Deriva uma chave AES de 256 bits via PBKDF2-HMAC-SHA256.
+     * @param password em CharArray (permite limpeza após uso).
+     */
+    fun derive(
+        password: CharArray,
+        salt: ByteArray,
+        iterations: Int = SecurityPolicy.PBKDF2_ITERATIONS
+    ): SecretKey {
+        val spec = PBEKeySpec(password, salt, iterations, 256)
+        try {
+            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            val bytes = factory.generateSecret(spec).encoded
+            return SecretKeySpec(bytes, "AES").also { bytes.fill(0) }
+        } finally {
+            spec.clearPassword()
+        }
     }
 
-    fun decrypt(key: ByteArray, blob: ByteArray): ByteArray {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, blob.copyOfRange(0, 12)))
-        return c.doFinal(blob, 12, blob.size - 12)
-    }
-
-    // Chave no Keystore, exigindo biometria a cada uso
-    private const val ALIAS = "cofre_bio"
-    private fun ksKey(): SecretKey {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
-        val g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        g.init(
-            KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setUserAuthenticationRequired(true)
-                .setInvalidatedByBiometricEnrollment(true).build()
+    /** Cifra com AES-256-GCM. Retorna IV || ciphertext||tag. */
+    fun encrypt(key: SecretKey, plaintext: ByteArray): ByteArray {
+        val iv = randomBytes(SecurityPolicy.IV_LENGTH_BYTES)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.ENCRYPT_MODE, key,
+            GCMParameterSpec(SecurityPolicy.GCM_TAG_BITS, iv)
         )
-        return g.generateKey()
+        return iv + cipher.doFinal(plaintext)
     }
 
-    fun bioCipher(mode: Int, iv: ByteArray? = null): Cipher {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        if (iv == null) c.init(mode, ksKey()) else c.init(mode, ksKey(), GCMParameterSpec(128, iv))
-        return c
+    /** Decifra IV || ciphertext||tag. */
+    fun decrypt(key: SecretKey, blob: ByteArray): ByteArray {
+        require(blob.size > SecurityPolicy.IV_LENGTH_BYTES) { "Blob inválido" }
+        val iv = blob.copyOfRange(0, SecurityPolicy.IV_LENGTH_BYTES)
+        val ct = blob.copyOfRange(SecurityPolicy.IV_LENGTH_BYTES, blob.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE, key,
+            GCMParameterSpec(SecurityPolicy.GCM_TAG_BITS, iv)
+        )
+        return cipher.doFinal(ct)
     }
 }

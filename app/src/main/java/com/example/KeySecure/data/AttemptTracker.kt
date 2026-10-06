@@ -1,3 +1,5 @@
+package com.example.KeySecure.data
+
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -7,6 +9,9 @@ import kotlinx.coroutines.flow.first
 
 private val Context.attemptStore by preferencesDataStore("attempts")
 
+/**
+ * Rastreia tentativas falhas de desbloqueio e aplica lockout temporário.
+ */
 class AttemptTracker(private val context: Context) {
 
     private val KEY_FAILED = intPreferencesKey("failed_attempts")
@@ -14,24 +19,25 @@ class AttemptTracker(private val context: Context) {
 
     suspend fun isLockedOut(): Boolean {
         val prefs = context.attemptStore.data.first()
-        val lockUntil = prefs[KEY_LOCK_UNTIL] ?: 0L
-        return System.currentTimeMillis() < lockUntil
+        val until = prefs[KEY_LOCK_UNTIL] ?: 0L
+        return System.currentTimeMillis() < until
     }
 
     suspend fun remainingLockoutMs(): Long {
         val prefs = context.attemptStore.data.first()
-        val lockUntil = prefs[KEY_LOCK_UNTIL] ?: 0L
-        return (lockUntil - System.currentTimeMillis()).coerceAtLeast(0L)
+        val until = prefs[KEY_LOCK_UNTIL] ?: 0L
+        return (until - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
     suspend fun registerFailure() {
         context.attemptStore.edit { prefs ->
             val failed = (prefs[KEY_FAILED] ?: 0) + 1
-            prefs[KEY_FAILED] = failed
             if (failed >= SecurityPolicy.MAX_FAILED_ATTEMPTS) {
                 prefs[KEY_LOCK_UNTIL] =
                     System.currentTimeMillis() + SecurityPolicy.LOCKOUT_DURATION_MS
                 prefs[KEY_FAILED] = 0
+            } else {
+                prefs[KEY_FAILED] = failed
             }
         }
     }
