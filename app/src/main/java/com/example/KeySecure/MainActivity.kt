@@ -6,6 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.getValue
@@ -101,7 +103,7 @@ private fun UnlockScreen(
 @Composable
 private fun VaultScreen(vm: VaultViewModel) {
     val context = LocalContext.current
-    // Placeholder: substitua por sua lista real de entradas
+    // Substitua por sua fonte real de dados
     val entries = remember { listOf<Pair<String, String>>() }
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {

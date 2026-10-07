@@ -3,10 +3,12 @@ package com.example.KeySecure
 import com.example.KeySecure.crypto.Crypto
 import com.example.KeySecure.data.SecurityPolicy
 import com.example.KeySecure.data.VaultEnvelope
-import com.example.KeySecure.util.Base64Ext
-import kotlinx.serialization.json.Json
+import com.example.KeySecure.util.base64
+import com.example.KeySecure.util.toBase64
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.*
+import kotlinx.serialization.decodeFromString
 import java.io.File
-import java.security.SecureRandom
 import javax.crypto.SecretKey
 
 /**

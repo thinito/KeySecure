@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     // Adicione:
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 kotlin {
     jvmToolchain(17)
@@ -56,5 +57,17 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Testes
+    testImplementation("junit:junit:4.13.2")
+
+    // AndroidX Test — necessário para InstrumentationRegistry
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+
+    // Se for usar Espresso também
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+
+    // JUnit (para testes unitários)
     testImplementation("junit:junit:4.13.2")
 }
