@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Item 5: USE_FINGERPRINT removida (obsoleta). androidx.biometric lida com compat. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
 
     <application
-        android:label="Cofre"
+        android:name=".KeySecureApp"
+        android:label="@string/app_name"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:usesCleartextTraffic="false"
-        android:theme="@android:style/Theme.Material.Light.DarkActionBar"
+        android:theme="@style/Theme.KeySecure"
         android:icon="@mipmap/icon"
         android:roundIcon="@mipmap/icon_round">
 

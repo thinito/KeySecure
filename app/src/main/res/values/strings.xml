@@ -1,3 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">KeySecure</string>
+    <string name="unlock_title">Desbloquear Cofre</string>
+    <string name="unlock_pin_hint">PIN (mín. %1$d dígitos)</string>
+    <string name="unlock_button">Desbloquear</string>
+    <string name="unlock_biometric">Usar biometria</string>
+    <string name="unlock_phrase_hint">Frase-chave</string>
+    <string name="setup_title">Criar Cofre</string>
+    <string name="setup_pin_hint">PIN (6 a 12 dígitos)</string>
+    <string name="setup_phrase_hint">Frase-chave (mín. 12 caracteres)</string>
+    <string name="setup_confirm">Criar</string>
+    <string name="vault_empty">Nenhuma entrada no cofre</string>
+    <string name="vault_add">Adicionar</string>
+    <string name="vault_copy">Copiar</string>
+    <string name="vault_delete">Excluir</string>
+    <string name="vault_edit">Editar</string>
+    <string name="error_pin_wrong">PIN incorreto</string>
+    <string name="error_pin_weak">PIN muito fraco ou inválido</string>
+    <string name="error_phrase_weak">Frase muito fraca</string>
+    <string name="error_locked_out">Bloqueado. Tente em %1$ds</string>
+    <string name="error_vault_corrupted">Arquivo do cofre corrompido</string>
 </resources>
