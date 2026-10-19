@@ -1,6 +1,7 @@
 package com.example.KeySecure
 
 import com.example.KeySecure.crypto.Crypto
+import com.example.KeySecure.crypto.IKeystore
 import com.example.KeySecure.crypto.KeystoreManager
 import com.example.KeySecure.data.SecurityPolicy
 import com.example.KeySecure.data.VaultEnvelope
@@ -21,7 +22,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.withLock
 
-/** Resultado tipado de uma tentativa de desbloqueio (item 15). */
+/** Resultado tipado de uma tentativa de desbloqueio */
 sealed class UnlockResult {
     object Success : UnlockResult()
     object WrongCredential : UnlockResult()
@@ -32,7 +33,7 @@ sealed class UnlockResult {
 
 class Vault(
     private val vaultFile: File,
-    private val keystore: KeystoreManager = KeystoreManager()
+    private val keystore: IKeystore = com.example.KeySecure.crypto.KeystoreManager()
 ) {
 
     private val lockGuard = ReentrantLock()

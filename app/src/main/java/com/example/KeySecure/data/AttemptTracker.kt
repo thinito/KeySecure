@@ -27,7 +27,7 @@ class AttemptTracker(private val context: Context) {
     /** Detecta se o dispositivo reiniciou desde a última leitura. */
     private suspend fun bootMarker(): Long =
         context.attemptStore.data.first()[longPreferencesKey("boot_marker")]
-            ?: System.currentTimeMillis() - now()
+            ?: (System.currentTimeMillis() - now())
 
     private suspend fun ensureBootMarker() {
         context.attemptStore.edit { prefs ->

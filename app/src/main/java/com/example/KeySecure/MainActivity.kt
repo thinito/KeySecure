@@ -22,12 +22,20 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.KeySecure.data.SecurityPolicy
 import com.example.KeySecure.data.VaultEntry
 import com.example.KeySecure.ui.*
+import com.example.KeySecure.R
+import androidx.lifecycle.ViewModelProvider
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity () {
 
-    private val unlockVm: UnlockViewModel by viewModels()
-    private val vaultVm: VaultViewModel by viewModels()
-    private val setupVm: SetupViewModel by viewModels()
+    private val unlockVm: UnlockViewModel by lazy { 
+        ViewModelProvider(this)[UnlockViewModel::class.java] 
+    }
+    private val vaultVm: VaultViewModel by lazy { 
+        ViewModelProvider(this)[VaultViewModel::class.java] 
+    }
+    private val setupVm: SetupViewModel by lazy { 
+        ViewModelProvider(this)[SetupViewModel::class.java] 
+    }
 
     private val keyApp: KeySecureApp get() = application as KeySecureApp
 
@@ -39,7 +47,7 @@ class MainActivity : AppCompatActivity() {
         )
         setContent {
             MaterialTheme {
-                Surface(Modifier.fillMaxSize()) {
+                Surface(modifier = Modifier.fillMaxSize()) {
                     RootScreen(unlockVm, vaultVm, setupVm, keyApp)
                 }
             }
@@ -48,8 +56,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Item 7: NÃO limpa o clipboard aqui.
-        // Item 18: lock após timeout configurável (ver LockTimeoutHandler).
+        // NÃO limpa o clipboard aqui.
+        // Lock após timeout configurável (ver LockTimeoutHandler).
         LockTimeoutHandler.scheduleLock(keyApp.vault)
     }
 
@@ -66,7 +74,10 @@ private fun RootScreen(
     setupVm: SetupViewModel,
     keyApp: KeySecureApp
 ) {
+    // Coleta o estado, mas o Vault já existe (criado no KeySecureApp)
     val unlocked by keyApp.vault.unlocked.collectAsStateWithLifecycle()
+
+    // vaultExists é barato (File.exists), pode ficar aqui
     val vaultExists = remember { keyApp.vault.exists() }
 
     when {
@@ -75,7 +86,6 @@ private fun RootScreen(
         else -> UnlockScreen(unlockVm)
     }
 }
-
 @Composable
 private fun UnlockScreen(vm: UnlockViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()

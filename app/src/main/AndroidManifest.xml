@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Item 5: USE_FINGERPRINT removida (obsoleta). androidx.biometric lida com compat. -->
+    <!--USE_FINGERPRINT removida (obsoleta). androidx.biometric lida com compat. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
@@ -14,13 +14,11 @@
         android:theme="@style/Theme.KeySecure"
         android:icon="@mipmap/icon"
         android:roundIcon="@mipmap/icon_round">
-
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

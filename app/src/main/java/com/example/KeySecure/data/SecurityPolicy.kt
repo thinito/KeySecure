@@ -9,6 +9,7 @@ object SecurityPolicy {
 
     const val MAX_FAILED_ATTEMPTS = 5
     const val BASE_LOCKOUT_MS = 30_000L          // 30s
+    const val LOCK_TIMEOUT_MS = 30_000L          // 30s
     const val MAX_LOCKOUT_MS = 30 * 60_000L      // teto de 30min (backoff exponencial)
 
     const val PBKDF2_ITERATIONS = 600_000
@@ -18,8 +19,6 @@ object SecurityPolicy {
     const val SALT_LENGTH_BYTES = 16
     const val IV_LENGTH_BYTES = 12
     const val GCM_TAG_BITS = 128
-
-    const val LOCK_TIMEOUT_MS = 30_000L
 
     /**
      * apenas dígitos ASCII '0'..'9'. Bloqueia PINs triviais.
@@ -50,7 +49,7 @@ object SecurityPolicy {
         val phrase = normalizePassphrase(raw)
         if (phrase.length !in MIN_PASSPHRASE_LENGTH..MAX_PASSPHRASE_LENGTH) return false
         if (phrase.all { it == phrase[0] }) return false
-        if (phrase.toLowerCase() in COMMON_PASSPHRASES) return false
+        if (phrase.lowercase() in COMMON_PASSPHRASES) return false
         // Mínimo de 3 classes de caracteres
         val classes = listOf(
             phrase.any { it.isLowerCase() },

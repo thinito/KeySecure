@@ -15,6 +15,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Estado da tela de desbloqueio.
+ *
+ * `isLocked` é derivado de `lockoutRemainingSec` (não é campo do construtor),
+ * por isso NÃO pode ser passado em copy(...).
+ */
 data class UnlockState(
     val pin: String = "",
     val phrase: String = "",
@@ -40,19 +46,35 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
     private var countdownJob: Job? = null
 
     init {
-        viewModelScope.launch { refreshLockout() }
+        // I/O na IO thread (DataStore é lento no primeiro acesso)
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshLockoutSuspend()
+        }
         viewModelScope.launch {
-            vault.unlocked.collect { if (!it) _state.value = UnlockState() }
+            vault.unlocked.collect { isUnlocked ->
+                if (!isUnlocked) {
+                    countdownJob?.cancel()
+                    _state.value = UnlockState()
+                }
+            }
         }
     }
 
-    private suspend fun refreshLockout() {
+    // ------------------------------------------------------------------
+    // Lockout
+    // ------------------------------------------------------------------
+    private suspend fun refreshLockoutSuspend() {
         val pinRemain = if (tracker.isPinLockedOut()) tracker.pinRemainingMs() else 0L
         val phraseRemain = if (tracker.isPhraseLockedOut()) tracker.phraseRemainingMs() else 0L
-        val remain = maxOf(pinRemain, phraseRemain)
-        if (remain > 0) {
-            _state.update { it.copy(lockoutRemainingSec = (remain / 1000).toInt()) }
-            startCountdown()
+        val remainMs = maxOf(pinRemain, phraseRemain)
+
+        withContext(Dispatchers.Main) {
+            if (remainMs > 0) {
+                _state.update { it.copy(lockoutRemainingSec = (remainMs / 1000).toInt()) }
+                startCountdown()
+            } else {
+                _state.update { it.copy(lockoutRemainingSec = 0) }
+            }
         }
     }
 
@@ -65,63 +87,104 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(lockoutRemainingSec = (it.lockoutRemainingSec - 1).coerceAtLeast(0))
                 }
             }
-            // volta a false quando o lockout expira
-            _state.update { it.copy(isProcessing = false, error = null) }
+            _state.update { it.copy(error = null) }
         }
     }
 
-    fun onPinChange(v: String) {
-        if (v.length <= SecurityPolicy.MAX_PIN_LENGTH && v.all { it in '0'..'9' })
-            _state.update { it.copy(pin = v, error = null) }
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
+    fun onPinChange(value: String) {
+        if (value.length <= SecurityPolicy.MAX_PIN_LENGTH && value.all { it in '0'..'9' }) {
+            _state.update { it.copy(pin = value, error = null) }
+        }
     }
 
-    fun onPhraseChange(v: String) =
-        _state.update { it.copy(phrase = v, error = null) }
+    fun onPhraseChange(value: String) {
+        _state.update { it.copy(phrase = value, error = null) }
+    }
 
-    fun toggleUsePhrase() =
+    fun toggleUsePhrase() {
         _state.update { it.copy(usePhrase = !it.usePhrase, error = null) }
+    }
 
+    // ------------------------------------------------------------------
+    // Submit
+    // ------------------------------------------------------------------
     fun submit() {
-        if (_state.value.isProcessing || _state.value.isLocked) return
-        //  serialize submit para evitar corrida em toque duplo
+        val s = _state.value
+        if (s.isProcessing || s.isLocked) return
+
         submitJob?.cancel()
         submitJob = viewModelScope.launch {
             _state.update { it.copy(isProcessing = true, error = null) }
 
-            val s = _state.value
-            val result = withContext(Dispatchers.Default) {
-                if (s.usePhrase) {
-                    if (tracker.isPhraseLockedOut()) return@withContext UnlockResult.WrongCredential
-                    vault.unlockPhrase(s.phrase.toCharArray())
-                } else {
-                    if (!SecurityPolicy.isValidPin(s.pin)) {
-                        return@withContext UnlockResult.WrongCredential
+            val usePhrase = s.usePhrase
+            val pinChars = if (usePhrase) null else s.pin.toCharArray()
+            val phraseChars = if (usePhrase) s.phrase.toCharArray() else null
+
+            val result: UnlockResult = withContext(Dispatchers.Default) {
+                try {
+                    if (usePhrase) {
+                        if (tracker.isPhraseLockedOut()) UnlockResult.WrongCredential
+                        else vault.unlockPhrase(phraseChars!!)
+                    } else {
+                        if (!SecurityPolicy.isValidPin(s.pin)) UnlockResult.WrongCredential
+                        else if (tracker.isPinLockedOut()) UnlockResult.WrongCredential
+                        else vault.unlockPin(pinChars!!)
                     }
-                    if (tracker.isPinLockedOut()) return@withContext UnlockResult.WrongCredential
-                    vault.unlockPin(s.pin.toCharArray())
+                } catch (t: Throwable) {
+                    UnlockResult.Failure(t)
                 }
             }
 
             when (result) {
                 is UnlockResult.Success -> {
-                    if (s.usePhrase) tracker.resetPhrase() else tracker.resetPin()
-                    _state.update { it.copy(pin = "", phrase = "", error = null, isProcessing = false) }
+                    if (usePhrase) tracker.resetPhrase() else tracker.resetPin()
+                    _state.update {
+                        it.copy(pin = "", phrase = "", error = null, isProcessing = false)
+                    }
                 }
                 is UnlockResult.WrongCredential -> {
-                    if (s.usePhrase) tracker.registerPhraseFailure() else tracker.registerPinFailure()
-                    _state.update { it.copy(error = "Credencial incorreta", isProcessing = false) }
-                    refreshLockout()
+                    if (usePhrase) tracker.registerPhraseFailure() else tracker.registerPinFailure()
+                    _state.update {
+                        it.copy(error = "Credencial incorreta", isProcessing = false)
+                    }
+                    refreshLockoutSuspend()
                 }
                 is UnlockResult.NoVault -> {
-                    _state.update { it.copy(error = "Nenhum cofre encontrado", isProcessing = false) }
+                    _state.update {
+                        it.copy(error = "Nenhum cofre encontrado", isProcessing = false)
+                    }
                 }
                 is UnlockResult.CorruptedVault -> {
-                    _state.update { it.copy(error = "Arquivo corrompido", vaultCorrupted = true, isProcessing = false) }
+                    _state.update {
+                        it.copy(
+                            error = "Arquivo corrompido",
+                            vaultCorrupted = true,
+                            isProcessing = false
+                        )
+                    }
                 }
                 is UnlockResult.Failure -> {
-                    _state.update { it.copy(error = result.cause.message ?: "Erro", isProcessing = false) }
+                    _state.update {
+                        it.copy(
+                            error = result.cause.message ?: "Erro inesperado",
+                            isProcessing = false
+                        )
+                    }
                 }
             }
+
+            // Limpeza defensiva dos buffers sensíveis
+            pinChars?.fill('\u0000')
+            phraseChars?.fill('\u0000')
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        countdownJob?.cancel()
+        submitJob?.cancel()
     }
 }

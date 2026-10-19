@@ -1,14 +1,67 @@
 package com.example.KeySecure
 
 import com.example.KeySecure.data.SecurityPolicy
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SecurityPolicyTest {
-    @Test fun pin_curto_invalido() = assertFalse(SecurityPolicy.isValidPin("12345"))
-    @Test fun pin_valido() = assertTrue(SecurityPolicy.isValidPin("123456"))
-    @Test fun pin_com_letra_invalido() = assertFalse(SecurityPolicy.isValidPin("12a456"))
-    @Test fun frase_curta_invalida() = assertFalse(SecurityPolicy.isValidPassphrase("curta"))
-    @Test fun frase_valida() =
-        assertTrue(SecurityPolicy.isValidPassphrase("minha frase longa"))
+
+    // PIN "482917": 6 dígitos ASCII, sem repetição, sem sequência crescente/decrescente.
+    // Use este como padrão em todos os testes.
+    private val validPin = "482917"
+
+    @Test
+    fun pin_valido() {
+        assertTrue("PIN '$validPin' deveria ser válido",
+            SecurityPolicy.isValidPin(validPin))
+    }
+
+    @Test
+    fun pin_curto_invalido() {
+        assertFalse(SecurityPolicy.isValidPin("12345"))
+    }
+
+    @Test
+    fun pin_longo_invalido() {
+        assertFalse(SecurityPolicy.isValidPin("1234567890123"))
+    }
+
+    @Test
+    fun pin_rejeita_nao_ascii() {
+        assertFalse(SecurityPolicy.isValidPin("١٢٣٤٥٦"))
+    }
+
+    @Test
+    fun pin_rejeita_triviais() {
+        assertFalse(SecurityPolicy.isValidPin("000000"))
+        assertFalse(SecurityPolicy.isValidPin("111111"))
+        assertFalse(SecurityPolicy.isValidPin("123456"))
+        assertFalse(SecurityPolicy.isValidPin("654321"))
+    }
+
+    @Test
+    fun frase_normaliza_nfkc() {
+        val a = "café com leite"
+        val b = "cafe\u0301 com leite"
+        assertEquals(
+            SecurityPolicy.normalizePassphrase(a),
+            SecurityPolicy.normalizePassphrase(b)
+        )
+    }
+
+    @Test
+    fun frase_rejeita_fraca() {
+        assertFalse(SecurityPolicy.isValidPassphrase("aaaaaaaaaaaa"))
+        assertFalse(SecurityPolicy.isValidPassphrase("password"))
+        assertTrue(SecurityPolicy.isValidPassphrase("minha frase boa 2024"))
+    }
+
+    @Test
+    fun valida_iteracoes() {
+        assertFalse(SecurityPolicy.validateIterations(1000))
+        assertFalse(SecurityPolicy.validateIterations(10_000_000))
+        assertTrue(SecurityPolicy.validateIterations(600_000))
+    }
 }

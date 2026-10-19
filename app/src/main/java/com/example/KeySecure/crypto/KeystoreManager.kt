@@ -7,25 +7,21 @@ import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
-/**
- * Gerencia a chave AES-256 armazenada no Android Keystore (TEE/StrongBox),
- * exigindo autenticação do usuário (biometria ou credencial do dispositivo).
- *
- * embrulha a master key com essa chave de hardware.
- * a autenticação é feita via BiometricPrompt com CryptoObject.
- */
-class KeystoreManager {
+class KeystoreManager : IKeystore {
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val ALIAS = "keysecure_master_wrapper_v1"
     }
 
-    private val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+    // ✅ lazy: o Keystore só é aberto quando realmente usado
+    private val keyStore: KeyStore by lazy {
+        KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+    }
 
-    fun hasKey(): Boolean = keyStore.containsAlias(ALIAS)
+    override fun hasKey(): Boolean = keyStore.containsAlias(ALIAS)
 
-    fun createKey() {
+    override fun createKey() {
         if (hasKey()) return
         val builder = KeyGenParameterSpec.Builder(
             ALIAS,
@@ -41,8 +37,9 @@ class KeystoreManager {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             builder.setUserAuthenticationParameters(
-                0, // sem timeout: exige auth a cada uso
-                KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL
+                0,
+                KeyProperties.AUTH_BIOMETRIC_STRONG or
+                        KeyProperties.AUTH_DEVICE_CREDENTIAL
             )
         }
 
@@ -51,12 +48,12 @@ class KeystoreManager {
             .generateKey()
     }
 
-    fun getKey(): SecretKey {
+    override fun getKey(): SecretKey {
         val entry = keyStore.getEntry(ALIAS, null) as KeyStore.SecretKeyEntry
         return entry.secretKey
     }
 
-    fun deleteKey() {
+    override fun deleteKey() {
         if (hasKey()) keyStore.deleteEntry(ALIAS)
     }
 }

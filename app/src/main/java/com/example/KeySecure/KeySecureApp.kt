@@ -15,6 +15,8 @@ class KeySecureApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // apenas cria as instâncias lazy.
+        // Nada de I/O pesado aqui.
+        // Não instancie Vault/AttemptTracker neste ponto:
+        // eles são inicializados sob demanda (lazy).
     }
 }
