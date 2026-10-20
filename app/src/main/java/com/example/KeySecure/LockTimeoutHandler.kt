@@ -1,49 +1,102 @@
 package com.example.KeySecure
 
-import android.os.Handler
-import android.os.Looper
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.SystemClock
 import com.example.KeySecure.data.SecurityPolicy
 
 /**
- * Agenda o travamento do cofre após um período em segundo plano.
+ * Gerencia o auto-lock do cofre em três frentes:
  *
- * Uso:
- *   - MainActivity.onStop()  -> scheduleLock(vault)
- *   - MainActivity.onStart() -> cancel()
+ *  1. `stoppedAt` (elapsedRealtime) marcado em `onStop`. Em `onStart`,
+ *     se `elapsedRealtime() - stoppedAt >= LOCK_TIMEOUT_MS`, tranca.
+ *     Usa `elapsedRealtime` (inclui sono profundo) em vez de
+ *     `uptimeMillis` (usado por `Handler.postDelayed`).
  *
- * lock configurável em vez de imediato.
+ *  2. `BroadcastReceiver` de `ACTION_SCREEN_OFF`, registrado enquanto
+ *     a activity está iniciada. Tranca imediatamente ao apagar a tela.
+ *
+ *  3. `onActivityDestroyed` (chamado com `isFinishing == true`) tranca
+ *     explicitamente, garantindo que a saída do app não deixe a chave
+ *     em memória.
+ *
+ * Compatível com um único `MainActivity` (estado é singleton).
  */
 object LockTimeoutHandler {
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var pending: Runnable? = null
+    private var stoppedAt: Long = 0L
 
-    /**
-     * Agenda o lock do cofre após [SecurityPolicy.LOCK_TIMEOUT_MS].
-     * Chamadas repetidas substituem o agendamento anterior.
-     */
-    fun scheduleLock(vault: Vault) {
-        cancel()
-        val r = Runnable { vault.lock() }
-        pending = r
-        handler.postDelayed(r, SecurityPolicy.LOCK_TIMEOUT_MS)
+    private var appContext: Context? = null
+    private var screenOffReceiver: BroadcastReceiver? = null
+
+    // ------------------------------------------------------------------
+    // Ciclo de vida
+    // ------------------------------------------------------------------
+
+    /** Chamado em `onStart`. Registra receiver e tranca se o tempo passou. */
+    fun onActivityStarted(context: Context, vault: Vault) {
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = if (stoppedAt > 0L && now >= stoppedAt) {
+            now - stoppedAt
+        } else {
+            0L
+        }
+        stoppedAt = 0L
+
+        if (elapsed >= SecurityPolicy.LOCK_TIMEOUT_MS) {
+            vault.lock()
+        }
+
+        registerScreenOff(context.applicationContext, vault)
     }
 
-    /**
-     * Cancela um lock pendente.
-     * Deve ser chamado quando o app volta ao primeiro plano.
-     */
-    fun cancel() {
-        pending?.let { handler.removeCallbacks(it) }
-        pending = null
+    /** Chamado em `onStop`. Marca `stoppedAt` e para de receber screen-off. */
+    fun onActivityStopped(vault: Vault) {
+        stoppedAt = SystemClock.elapsedRealtime()
+        unregisterScreenOff()
     }
 
-    /**
-     * Executa o lock imediatamente e cancela qualquer agendamento.
-     * Útil para ser chamado em ACTION_SCREEN_OFF ou logout manual.
-     */
-    fun lockNow(vault: Vault) {
-        cancel()
+    /** Chamado em `onDestroy` quando `isFinishing`. Tranca e limpa. */
+    fun onActivityDestroyed(vault: Vault) {
+        unregisterScreenOff()
         vault.lock()
+    }
+
+    // ------------------------------------------------------------------
+    // Screen-off receiver
+    // ------------------------------------------------------------------
+
+    private fun registerScreenOff(context: Context, vault: Vault) {
+        if (screenOffReceiver != null) return
+        appContext = context
+        screenOffReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                    vault.lock()
+                }
+            }
+        }
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(
+                screenOffReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(screenOffReceiver, filter)
+        }
+    }
+
+    private fun unregisterScreenOff() {
+        val ctx = appContext ?: return
+        val r = screenOffReceiver ?: return
+        runCatching { ctx.unregisterReceiver(r) }
+        screenOffReceiver = null
+        appContext = null
     }
 }

@@ -18,12 +18,14 @@ data class SetupState(
     val phrase: String = "",
     val error: String? = null,
     val isProcessing: Boolean = false,
-    val done: Boolean = false
+    val done: Boolean = false,
+    val pendingBiometricEnroll: Boolean = false
 )
 
 class SetupViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val vault = (app as KeySecureApp).vault
+    private val keyApp = app as KeySecureApp
+    private val vault = keyApp.vault
 
     private val _state = MutableStateFlow(SetupState())
     val state = _state.asStateFlow()
@@ -49,11 +51,20 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
                 vault.create(s.pin.toCharArray(), s.phrase.toCharArray())
             }
             when (result) {
-                is UnlockResult.Success ->
-                    _state.update { it.copy(done = true, isProcessing = false) }
-                else ->
-                    _state.update { it.copy(error = "Falha ao criar cofre", isProcessing = false) }
+                is UnlockResult.Success -> {
+                    val available = BiometricHelper.isAvailable(getApplication())
+                    _state.update {
+                        it.copy(done = true, isProcessing = false, pendingBiometricEnroll = available)
+                    }
+                }
+                else -> _state.update {
+                    it.copy(error = "Falha ao criar cofre", isProcessing = false)
+                }
             }
         }
+    }
+
+    fun finishBiometricEnroll() {
+        _state.update { it.copy(pendingBiometricEnroll = false) }
     }
 }

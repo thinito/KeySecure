@@ -15,12 +15,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * Estado da tela de desbloqueio.
- *
- * `isLocked` é derivado de `lockoutRemainingSec` (não é campo do construtor),
- * por isso NÃO pode ser passado em copy(...).
- */
 data class UnlockState(
     val pin: String = "",
     val phrase: String = "",
@@ -28,7 +22,9 @@ data class UnlockState(
     val error: String? = null,
     val lockoutRemainingSec: Int = 0,
     val isProcessing: Boolean = false,
-    val vaultCorrupted: Boolean = false
+    val vaultCorrupted: Boolean = false,
+    val legacyVault: Boolean = false,
+    val pepperMissing: Boolean = false
 ) {
     val isLocked: Boolean get() = lockoutRemainingSec > 0
 }
@@ -46,10 +42,7 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
     private var countdownJob: Job? = null
 
     init {
-        // I/O na IO thread (DataStore é lento no primeiro acesso)
-        viewModelScope.launch(Dispatchers.IO) {
-            refreshLockoutSuspend()
-        }
+        viewModelScope.launch(Dispatchers.IO) { refreshLockoutSuspend() }
         viewModelScope.launch {
             vault.unlocked.collect { isUnlocked ->
                 if (!isUnlocked) {
@@ -60,9 +53,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Lockout
-    // ------------------------------------------------------------------
     private suspend fun refreshLockoutSuspend() {
         val pinRemain = if (tracker.isPinLockedOut()) tracker.pinRemainingMs() else 0L
         val phraseRemain = if (tracker.isPhraseLockedOut()) tracker.phraseRemainingMs() else 0L
@@ -91,9 +81,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Input
-    // ------------------------------------------------------------------
     fun onPinChange(value: String) {
         if (value.length <= SecurityPolicy.MAX_PIN_LENGTH && value.all { it in '0'..'9' }) {
             _state.update { it.copy(pin = value, error = null) }
@@ -108,9 +95,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(usePhrase = !it.usePhrase, error = null) }
     }
 
-    // ------------------------------------------------------------------
-    // Submit
-    // ------------------------------------------------------------------
     fun submit() {
         val s = _state.value
         if (s.isProcessing || s.isLocked) return
@@ -166,6 +150,28 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }
+                is UnlockResult.NoPepper -> {
+                    // A chave HMAC do Keystore sumiu (ex.: factory reset).
+                    // PIN não é mais verificável. Frase é o caminho de recuperação.
+                    _state.update {
+                        it.copy(
+                            error = "PIN indisponível neste aparelho. Use a frase-chave.",
+                            pepperMissing = true,
+                            usePhrase = true,
+                            isProcessing = false
+                        )
+                    }
+                }
+                is UnlockResult.LegacyVaultNoPepper -> {
+                    _state.update {
+                        it.copy(
+                            error = "Cofre antigo (sem proteção de hardware). Use a frase-chave.",
+                            legacyVault = true,
+                            usePhrase = true,
+                            isProcessing = false
+                        )
+                    }
+                }
                 is UnlockResult.Failure -> {
                     _state.update {
                         it.copy(
@@ -176,7 +182,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // Limpeza defensiva dos buffers sensíveis
             pinChars?.fill('\u0000')
             phraseChars?.fill('\u0000')
         }
