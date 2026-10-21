@@ -4,7 +4,7 @@ import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge                      // ← NOVO
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import com.example.KeySecure.data.EntryItem
@@ -12,9 +12,9 @@ import com.example.KeySecure.data.EntryItem
 
 // Compose — layout
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.WindowInsets              // ← NOVO
-import androidx.compose.foundation.layout.safeDrawing              // ← NOVO
-import androidx.compose.foundation.layout.safeDrawingPadding       // ← NOVO
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState

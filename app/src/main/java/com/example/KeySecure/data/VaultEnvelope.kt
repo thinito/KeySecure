@@ -3,17 +3,23 @@ package com.example.KeySecure.data
 import kotlinx.serialization.Serializable
 
 /**
- * Envelope em disco. O `version` continua 4 porque o header/AAD não
- * mudou nesta rodada — a migração de entradas é interna ao campo `data`.
+ * Envelope em disco.
  *
- * Campos `id`, `createdAt`, `updatedAt` de [VaultEntry] usam default
- * (`""` e `0L`) para permitir desserializar vaults antigos. A migração
- * de fato acontece em `Vault.migrateEntriesIfNeeded` antes de publicar
- * o estado destrancado.
+ * Mudanças de formato (v4):
+ *  - `counter`: contador monotônico, incrementado em cada gravação.
+ *    Incluído no AAD do campo `data`, então adulterar o contador quebra
+ *    a decifra. Serve também como base para detecção de rollback via
+ *    arquivo `.meta`.
+ *  - AAD agora é prefixado com o papel (`pin|`, `phrase|`, `data|`,
+ *    `keystore|`), evitando reuso entre contextos.
+ *
+ * `version` deve ser escrito **explicitamente** (`encodeDefaults = true`),
+ * para que arquivos antigos nunca sejam lidos com um default novo.
  */
 @Serializable
 data class VaultEnvelope(
-    val version: Int = 4,
+    val version: Int = CURRENT_VERSION,
+    val counter: Long = 0L,
     val iterPin: Int,
     val iterPhrase: Int,
     val saltPin: String,
@@ -22,19 +28,13 @@ data class VaultEnvelope(
     val wrappedKeyPhrase: String,
     val wrappedKeyKeystore: String? = null,
     val data: String
-)
+) {
+    companion object {
+        const val CURRENT_VERSION = 4
+        const val MIN_SUPPORTED_VERSION = 3
+    }
+}
 
-/**
- * Entrada do cofre.
- *
- * - `id`: UUID estável. Entradas antigas (sem id) recebem um na primeira
- *   vez que o cofre é aberto.
- * - `createdAt`/`updatedAt`: timestamps em wall clock (ms desde epoch).
- * - `name`, `user`, `pass`: os dados em si.
- *
- * A UI usa `id` como chave estável da lista e as operações CRUD usam
- * `id` como identificador — não `==` de dados.
- */
 @Serializable
 data class VaultEntry(
     val id: String = "",

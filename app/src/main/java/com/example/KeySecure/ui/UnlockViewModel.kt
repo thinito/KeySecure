@@ -41,6 +41,7 @@ private sealed class UnlockOutcome {
     object NoPepper : UnlockOutcome()
     object LegacyVaultNoPepper : UnlockOutcome()
     object Aborted : UnlockOutcome()
+    object RollbackDetected : UnlockOutcome()
     data class Failure(val cause: Throwable) : UnlockOutcome()
 }
 
@@ -250,6 +251,15 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
+            is UnlockOutcome.RollbackDetected -> {
+                _state.update {
+                    it.copy(
+                        error = app.getString(R.string.error_rollback_detected),
+                        vaultCorrupted = true,
+                        isProcessing = false
+                    )
+                }
+            }
         }
     }
 
@@ -272,5 +282,6 @@ private fun UnlockResult.toOutcome(): UnlockOutcome = when (this) {
     UnlockResult.NoPepper -> UnlockOutcome.NoPepper
     UnlockResult.LegacyVaultNoPepper -> UnlockOutcome.LegacyVaultNoPepper
     UnlockResult.Aborted -> UnlockOutcome.Aborted
+    UnlockResult.RollbackDetected -> UnlockOutcome.RollbackDetected
     is UnlockResult.Failure -> UnlockOutcome.Failure(cause)
 }

@@ -107,6 +107,12 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
                 _lastError.value = msg
                 Result.failure(IllegalStateException(msg))
             }
+            // rollback detectado
+            is UnlockResult.RollbackDetected -> {
+                val msg = app.getString(R.string.error_rollback_detected)
+                _lastError.value = msg
+                Result.failure(IllegalStateException(msg))
+            }
             is UnlockResult.Aborted -> Result.failure(IllegalStateException("Abortado"))
             is UnlockResult.Failure -> {
                 _lastError.value = result.cause.message ?: "Erro"
@@ -114,7 +120,6 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
-
     private fun handle(result: Result<*>) {
         result.onSuccess {
             _lastError.value = null

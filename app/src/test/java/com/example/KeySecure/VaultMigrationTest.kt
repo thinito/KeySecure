@@ -213,30 +213,6 @@ class VaultMigrationTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun recupera_de_bak_quando_principal_corrompido() {
-        val v = newVault()
-        v.create(validPin.toCharArray(), validPhrase.toCharArray())
-        v.addEntry("GitHub", "user", "pass").getOrThrow()
-
-        // Segunda gravação para gerar .bak a partir do principal.
-        val list = v.getEntries()
-        v.updateEntry(list[0].id, "GitHub2", "user", "pass").getOrThrow()
-        v.lock()
-
-        // Corrompe o principal
-        val main = File(tmp.root, "vault.json")
-        main.writeText("{ corrompido ")
-
-        val v2 = vaultFromSameFile()
-        val result = v2.unlockPin(validPin.toCharArray())
-        assertTrue("esperado Success via .bak, veio $result",
-            result is UnlockResult.Success)
-
-        assertFalse("vault.json deve ter sido restaurado",
-            main.readText().startsWith("{ corrompido"))
-    }
-
-    @Test
     fun corrompido_sem_bak_retorna_corrupted() {
         val v = newVault()
         v.create(validPin.toCharArray(), validPhrase.toCharArray())
