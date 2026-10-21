@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.KeySecure" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.KeySecure" parent="Theme.AppCompat.Light.NoActionBar">
+    <item name="android:windowBackground">@android:color/white</item>
+    <!-- Remove a splash screen padrão do Android 12+ -->
+    <item name="android:windowSplashScreenBackground">@android:color/white</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+</style>
 </resources>

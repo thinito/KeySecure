@@ -1,8 +1,4 @@
-# ---- Compose ----
--keep class androidx.compose.** { *; }
--dontwarn androidx.compose.**
-
-# ---- Kotlinx Serialization (VaultEnvelope/VaultEntry) ----
+# Kotlinx Serialization — preserva serializers gerados
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
 -keepclassmembers class com.example.KeySecure.data.** {
@@ -13,15 +9,13 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
-# ---- Remove logs em release ----
+# NÃO preservar androidx.compose.** — R8 já sabe o que fazer (item 23)
+
+# Remover apenas logs verbosos (não remover Log.e nem Log.w)
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** v(...);
-    public static *** i(...);
-    public static *** w(...);
-    public static *** e(...);
 }
 
-# ---- Ofuscação ----
 -repackageclasses ''
 -allowaccessmodification

@@ -1,3 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">KeySecure</string>
+
+    <!-- Setup -->
+    <string name="setup_title">Criar Cofre</string>
+    <string name="setup_pin_hint">PIN (6 a 12 dígitos)</string>
+    <string name="setup_confirm_pin_hint">Confirmar PIN</string>
+    <string name="setup_phrase_hint">Frase-chave (mín. 12 caracteres)</string>
+    <string name="setup_confirm_phrase_hint">Confirmar frase-chave</string>
+    <string name="setup_confirm">Criar</string>
+    <string name="setup_creating">Criando…</string>
+
+    <!-- Unlock -->
+    <string name="unlock_title">Desbloquear Cofre</string>
+    <string name="unlock_pin_hint">PIN (mín. %1$d dígitos)</string>
+    <string name="unlock_phrase_hint">Frase-chave</string>
+    <string name="unlock_button">Desbloquear</string>
+    <string name="unlock_checking">Verificando…</string>
+    <string name="unlock_biometric">Usar biometria</string>
+    <string name="unlock_use_pin">Usar PIN</string>
+    <string name="unlock_use_phrase">Usar frase-chave</string>
+
+    <!-- Vault -->
+    <string name="vault_empty">Nenhuma entrada no cofre</string>
+    <string name="vault_add">Adicionar</string>
+    <string name="vault_add_entry">Adicionar entrada</string>
+    <string name="vault_copy">Copiar</string>
+    <string name="vault_edit">Editar</string>
+    <string name="vault_delete">Excluir</string>
+    <string name="vault_lock">Trancar</string>
+    <string name="vault_locked_toast">Cofre trancado</string>
+    <string name="vault_copied_toast">Senha copiada (será apagada em 30s)</string>
+
+    <!-- Erros — TODOS os textos de erro da UI vêm daqui -->
+    <string name="error_pin_format">PIN deve ter entre %1$d e %2$d dígitos</string>
+    <string name="error_pin_weak">PIN muito fraco. Evite sequências (123456) e dígitos repetidos (000000).</string>
+    <string name="error_pin_mismatch">Os PINs não coincidem</string>
+
+    <string name="error_phrase_format">Frase-chave deve ter pelo menos %1$d caracteres</string>
+    <string name="error_phrase_too_long">Frase-chave deve ter no máximo %1$d caracteres</string>
+    <string name="error_phrase_weak">Frase muito fraca. Use palavras variadas.</string>
+    <string name="error_phrase_mismatch">As frases não coincidem</string>
+
+    <string name="error_wrong_credential">Credencial incorreta</string>
+    <string name="error_locked_out">Bloqueado. Tente em %1$ds</string>
+    <string name="error_no_vault">Nenhum cofre encontrado</string>
+    <string name="error_vault_corrupted">Arquivo do cofre corrompido</string>
+    <string name="error_no_pepper">PIN indisponível neste aparelho. Use a frase-chave.</string>
+    <string name="error_legacy_vault">Cofre antigo (sem proteção de hardware). Use a frase-chave.</string>
+    <string name="error_create_failed">Falha ao criar cofre. Tente novamente.</string>
+    <string name="error_unexpected">Erro inesperado. Tente novamente.</string>
+
+    <!-- Biometria -->
+    <string name="biometric_unavailable">Biometria indisponível</string>
+    <string name="biometric_invalidated">Biometria foi invalidada. Use o PIN e reative.</string>
+    <string name="biometric_error">Biometria: %1$s</string>
+
+    <!-- Configurações / troca de credenciais -->
+    <string name="settings_title">Configurações</string>
+    <string name="settings_change_pin">Trocar PIN</string>
+    <string name="settings_change_phrase">Trocar frase-chave</string>
+    <string name="settings_upgrade_iterations">Atualizar iterações</string>
+    <string name="settings_upgrade_needed">Upgrade de segurança disponível</string>
+    <string name="settings_upgrade_hint">Requer PIN e frase atuais. Biometria será desativada.</string>
+
+    <string name="change_pin_title">Trocar PIN</string>
+    <string name="change_pin_current">PIN atual</string>
+    <string name="change_pin_new">Novo PIN</string>
+    <string name="change_pin_confirm">Confirmar novo PIN</string>
+
+    <string name="change_phrase_title">Trocar frase-chave</string>
+    <string name="change_phrase_current">Frase atual</string>
+    <string name="change_phrase_new">Nova frase</string>
+    <string name="change_phrase_confirm">Confirmar nova frase</string>
+
+    <string name="upgrade_iterations_title">Atualizar iterações do PBKDF2</string>
+    <string name="upgrade_iterations_pin">PIN atual</string>
+    <string name="upgrade_iterations_phrase">Frase atual</string>
+    <string name="upgrade_iterations_warning">A biometria será desativada. Você poderá reativá-la depois.</string>
+    <string name="upgrade_iterations_success">Iterações atualizadas. Reative a biometria se desejar.</string>
+
+    <string name="error_pin_current_wrong">PIN atual incorreto</string>
+    <string name="error_phrase_current_wrong">Frase atual incorreta</string>
+    <string name="error_change_failed">Falha ao alterar credencial</string>
+
+    <string name="action_save">Salvar</string>
+    <string name="action_cancel">Cancelar</string>
+    <string name="action_close">Fechar</string>
 </resources>
