@@ -32,10 +32,13 @@
     <string name="vault_locked_toast">Cofre trancado</string>
     <string name="vault_copied_toast">Senha copiada (será apagada em 30s)</string>
 
+    <string name="tapjacking_blocked">Toque bloqueado: há uma janela sobreposta na tela.</string>
+
     <!-- Erros — TODOS os textos de erro da UI vêm daqui -->
     <string name="error_pin_format">PIN deve ter entre %1$d e %2$d dígitos</string>
     <string name="error_pin_weak">PIN muito fraco. Evite sequências (123456) e dígitos repetidos (000000).</string>
     <string name="error_pin_mismatch">Os PINs não coincidem</string>
+    <string name="error_legacy_vault">Este cofre está em um formato antigo. Abra com a frase-chave e use Configurações → Atualizar para migrar.</string>
 
     <string name="error_phrase_format">Frase-chave deve ter pelo menos %1$d caracteres</string>
     <string name="error_phrase_too_long">Frase-chave deve ter no máximo %1$d caracteres</string>
@@ -47,7 +50,6 @@
     <string name="error_no_vault">Nenhum cofre encontrado</string>
     <string name="error_vault_corrupted">Arquivo do cofre corrompido</string>
     <string name="error_no_pepper">PIN indisponível neste aparelho. Use a frase-chave.</string>
-    <string name="error_legacy_vault">Cofre antigo (sem proteção de hardware). Use a frase-chave.</string>
     <string name="error_create_failed">Falha ao criar cofre. Tente novamente.</string>
     <string name="error_unexpected">Erro inesperado. Tente novamente.</string>
 

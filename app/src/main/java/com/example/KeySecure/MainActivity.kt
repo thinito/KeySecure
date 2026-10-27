@@ -49,6 +49,7 @@ import com.example.KeySecure.data.SecurityPolicy
 import com.example.KeySecure.data.VaultState
 import com.example.KeySecure.ui.*
 import com.example.KeySecure.util.ClipboardUtil
+import com.example.KeySecure.util.filterObscuredTouches
 
 class MainActivity : AppCompatActivity() {
 
@@ -66,6 +67,11 @@ class MainActivity : AppCompatActivity() {
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
         )
+
+        // ✅ PROTEÇÃO PRINCIPAL: rejeita todos os toques quando a janela
+        // estiver obscurecida por sobreposição maliciosa. Framework cancela
+        // os eventos antes de chegarem ao Compose.
+        window.decorView.filterTouchesWhenObscured = true
 
         setContent {
             MaterialTheme {
@@ -104,19 +110,28 @@ private fun RootScreen(
     setupVm: SetupViewModel,
     keyApp: KeySecureApp
 ) {
-    // ✅ Fonte única de verdade: um único StateFlow<VaultState>
     val vaultState by keyApp.vaultRepository.state.collectAsStateWithLifecycle()
     val setupState by setupVm.state.collectAsStateWithLifecycle()
 
-    // SetupScreen aparece se: o cofre não existe OU se o enrollment biométrico
-    // pós-create está pendente (o `state` já virou Unlocked nesse instante).
     val showSetup = vaultState is VaultState.NotCreated ||
-            setupState.pendingBiometricEnroll
+        setupState.pendingBiometricEnroll
 
     when {
         showSetup -> SetupScreen(setupVm, keyApp, setupState)
         vaultState is VaultState.Unlocked -> VaultScreen(vaultVm)
         else -> UnlockScreen(unlockVm, keyApp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: aviso de tapjacking
+// ---------------------------------------------------------------------------
+@Composable
+private fun rememberObscuredCallback(): () -> Unit {
+    val context = LocalContext.current
+    val msg = stringResource(R.string.tapjacking_blocked)
+    return remember(context, msg) {
+        { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
     }
 }
 
@@ -128,15 +143,16 @@ private fun UnlockScreen(vm: UnlockViewModel, keyApp: KeySecureApp) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
+    val onObscured = rememberObscuredCallback()
 
     val hasBiometric = remember { keyApp.vaultRepository.hasBiometricEnrollment() }
     val biometricAvailable = remember { BiometricHelper.isAvailable(context) }
     val showBiometric = hasBiometric && biometricAvailable && activity != null
 
     val canSubmit = !state.isLocked && !state.isProcessing && (
-            if (state.usePhrase) SecurityPolicy.isWellFormedPassphrase(state.phrase)
-            else SecurityPolicy.isWellFormedPin(state.pin)
-            )
+        if (state.usePhrase) SecurityPolicy.isWellFormedPassphrase(state.phrase)
+        else SecurityPolicy.isWellFormedPin(state.pin)
+    )
 
     Column(
         Modifier
@@ -165,7 +181,9 @@ private fun UnlockScreen(vm: UnlockViewModel, keyApp: KeySecureApp) {
                 singleLine = true,
                 isError = state.error != null,
                 enabled = !state.isLocked && !state.isProcessing,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .filterObscuredTouches(onObscured)
             )
         } else {
             OutlinedTextField(
@@ -186,7 +204,9 @@ private fun UnlockScreen(vm: UnlockViewModel, keyApp: KeySecureApp) {
                 singleLine = true,
                 isError = state.error != null,
                 enabled = !state.isLocked && !state.isProcessing,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .filterObscuredTouches(onObscured)
             )
         }
 
@@ -206,7 +226,9 @@ private fun UnlockScreen(vm: UnlockViewModel, keyApp: KeySecureApp) {
         Button(
             onClick = vm::submit,
             enabled = canSubmit,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         ) {
             if (state.isProcessing) {
                 CircularProgressIndicator(
@@ -266,7 +288,9 @@ private fun UnlockScreen(vm: UnlockViewModel, keyApp: KeySecureApp) {
                     )
                 },
                 enabled = !state.isLocked && !state.isProcessing,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .filterObscuredTouches(onObscured)
             ) { Text(stringResource(R.string.unlock_biometric)) }
         }
 
@@ -294,6 +318,7 @@ private fun SetupScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? FragmentActivity
+    val onObscured = rememberObscuredCallback()
 
     LaunchedEffect(state.pendingBiometricEnroll) {
         if (state.pendingBiometricEnroll && activity != null) {
@@ -350,7 +375,9 @@ private fun SetupScreen(
             singleLine = true,
             isError = state.error != null,
             enabled = !state.isProcessing && !state.done,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         )
         Spacer(Modifier.height(8.dp))
 
@@ -367,7 +394,9 @@ private fun SetupScreen(
             singleLine = true,
             isError = state.error != null,
             enabled = !state.isProcessing && !state.done,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         )
         Spacer(Modifier.height(16.dp))
 
@@ -384,7 +413,9 @@ private fun SetupScreen(
             singleLine = true,
             isError = state.error != null,
             enabled = !state.isProcessing && !state.done,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         )
         Spacer(Modifier.height(8.dp))
 
@@ -404,7 +435,9 @@ private fun SetupScreen(
             singleLine = true,
             isError = state.error != null,
             enabled = !state.isProcessing && !state.done,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         )
 
         state.error?.let {
@@ -416,7 +449,9 @@ private fun SetupScreen(
         Button(
             onClick = vm::create,
             enabled = state.canSubmit,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .filterObscuredTouches(onObscured)
         ) {
             if (state.isProcessing) {
                 CircularProgressIndicator(
@@ -441,6 +476,7 @@ private fun VaultScreen(vm: VaultViewModel) {
     val context = LocalContext.current
     val entries by vm.entries.collectAsStateWithLifecycle()
     val lastError by vm.lastError.collectAsStateWithLifecycle()
+    val onObscured = rememberObscuredCallback()
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(lastError) {
@@ -485,15 +521,18 @@ private fun VaultScreen(vm: VaultViewModel) {
                     editingPassword = null
                     showEntryDialog = true
                 }) { Text(stringResource(R.string.vault_add)) }
-                OutlinedButton(onClick = {
-                    vm.lock()
-                    ClipboardUtil.clearNow(context)
-                    Toast.makeText(
-                        context,
-                        context.getString(R.string.vault_locked_toast),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }) { Text(stringResource(R.string.vault_lock)) }
+                OutlinedButton(
+                    onClick = {
+                        vm.lock()
+                        ClipboardUtil.clearNow(context)
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.vault_locked_toast),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    modifier = Modifier.filterObscuredTouches(onObscured)
+                ) { Text(stringResource(R.string.vault_lock)) }
             }
             HorizontalDivider()
 
@@ -548,7 +587,6 @@ private fun VaultScreen(vm: VaultViewModel) {
         }
     }
 
-    // -------- Diálogo de entrada (add/edit) --------
     if (showEntryDialog) {
         EntryDialog(
             initial = editingEntry,
@@ -575,7 +613,6 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
-    // -------- Confirmação de exclusão --------
     pendingDelete?.let { entry ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
@@ -599,7 +636,6 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
-    // -------- Diálogo de configurações --------
     if (showSettings) {
         AlertDialog(
             onDismissRequest = { showSettings = false },
@@ -654,24 +690,19 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
-    // -------- Trocar PIN --------
     if (showChangePin) {
         ChangePinDialog(vm = vm, onDismiss = { showChangePin = false })
     }
-
-    // -------- Trocar frase --------
     if (showChangePhrase) {
         ChangePhraseDialog(vm = vm, onDismiss = { showChangePhrase = false })
     }
-
-    // -------- Upgrade de iterações --------
     if (showUpgrade) {
         UpgradeIterationsDialog(vm = vm, onDismiss = { showUpgrade = false })
     }
 }
 
 // ---------------------------------------------------------------------------
-// EntryDialog
+// EntryDialog — proteção no campo de senha + botão Salvar
 // ---------------------------------------------------------------------------
 @Composable
 private fun EntryDialog(
@@ -680,6 +711,7 @@ private fun EntryDialog(
     onDismiss: () -> Unit,
     onSave: (name: String, user: String, pass: String) -> Result<Unit>
 ) {
+    val onObscured = rememberObscuredCallback()
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var user by remember { mutableStateOf(initial?.user ?: "") }
     var pass by remember { mutableStateOf(initialPassword ?: "") }
@@ -697,7 +729,6 @@ private fun EntryDialog(
             localError = e.message ?: e.javaClass.simpleName
             busy = false
         }
-        // Em sucesso, o caller fecha o diálogo.
     }
 
     AlertDialog(
@@ -724,7 +755,10 @@ private fun EntryDialog(
                         imeAction = ImeAction.Done
                     ),
                     keyboardActions = KeyboardActions(onDone = { submit() }),
-                    enabled = !busy, modifier = Modifier.fillMaxWidth()
+                    enabled = !busy,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 localError?.let {
                     Spacer(Modifier.height(4.dp))
@@ -733,7 +767,11 @@ private fun EntryDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { submit() }, enabled = canSave) {
+            TextButton(
+                onClick = { submit() },
+                enabled = canSave,
+                modifier = Modifier.filterObscuredTouches(onObscured)
+            ) {
                 Text(if (busy) "Salvando..." else "Salvar")
             }
         },
@@ -751,6 +789,7 @@ private fun EntryDialog(
 @Composable
 private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
     val opState by vm.opState.collectAsStateWithLifecycle()
+    val onObscured = rememberObscuredCallback()
     var current by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
@@ -763,9 +802,9 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
     }
 
     val canSave = !opState.isProcessing &&
-            current.isNotEmpty() &&
-            SecurityPolicy.isStrongPin(newPin) &&
-            newPin == confirm
+        current.isNotEmpty() &&
+        SecurityPolicy.isStrongPin(newPin) &&
+        newPin == confirm
 
     AlertDialog(
         onDismissRequest = {
@@ -783,7 +822,9 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 OutlinedTextField(
                     value = newPin, onValueChange = { newPin = it },
@@ -791,7 +832,9 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 OutlinedTextField(
                     value = confirm, onValueChange = { confirm = it },
@@ -799,7 +842,9 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 opState.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -809,7 +854,8 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = { vm.changePin(current, newPin) },
-                enabled = canSave
+                enabled = canSave,
+                modifier = Modifier.filterObscuredTouches(onObscured)
             ) {
                 if (opState.isProcessing) {
                     CircularProgressIndicator(
@@ -836,6 +882,7 @@ private fun ChangePinDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
 @Composable
 private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
     val opState by vm.opState.collectAsStateWithLifecycle()
+    val onObscured = rememberObscuredCallback()
     var current by remember { mutableStateOf("") }
     var newPhrase by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
@@ -848,9 +895,9 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
     }
 
     val canSave = !opState.isProcessing &&
-            current.isNotEmpty() &&
-            SecurityPolicy.isStrongPassphrase(newPhrase) &&
-            newPhrase == confirm
+        current.isNotEmpty() &&
+        SecurityPolicy.isStrongPassphrase(newPhrase) &&
+        newPhrase == confirm
 
     AlertDialog(
         onDismissRequest = {
@@ -868,7 +915,9 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 OutlinedTextField(
                     value = newPhrase, onValueChange = { newPhrase = it },
@@ -876,7 +925,9 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 OutlinedTextField(
                     value = confirm, onValueChange = { confirm = it },
@@ -884,7 +935,9 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 opState.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -894,7 +947,8 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = { vm.changePassphrase(current, newPhrase) },
-                enabled = canSave
+                enabled = canSave,
+                modifier = Modifier.filterObscuredTouches(onObscured)
             ) {
                 if (opState.isProcessing) {
                     CircularProgressIndicator(
@@ -921,6 +975,7 @@ private fun ChangePhraseDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
 @Composable
 private fun UpgradeIterationsDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
     val opState by vm.opState.collectAsStateWithLifecycle()
+    val onObscured = rememberObscuredCallback()
     var pin by remember { mutableStateOf("") }
     var phrase by remember { mutableStateOf("") }
 
@@ -953,7 +1008,9 @@ private fun UpgradeIterationsDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 OutlinedTextField(
                     value = phrase, onValueChange = { phrase = it },
@@ -961,7 +1018,9 @@ private fun UpgradeIterationsDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true, enabled = !opState.isProcessing,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .filterObscuredTouches(onObscured)
                 )
                 opState.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -971,7 +1030,8 @@ private fun UpgradeIterationsDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = { vm.upgradeIterations(pin, phrase) },
-                enabled = canSave
+                enabled = canSave,
+                modifier = Modifier.filterObscuredTouches(onObscured)
             ) {
                 if (opState.isProcessing) {
                     CircularProgressIndicator(

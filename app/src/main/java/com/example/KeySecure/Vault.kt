@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
@@ -34,14 +36,20 @@ sealed class UnlockResult {
     object WrongCredential : UnlockResult()
     object NoVault : UnlockResult()
     object CorruptedVault : UnlockResult()
+
+    /** Pepper HMAC do Keystore não existe (device reset). */
     object NoPepper : UnlockResult()
+
+    /**
+     * Operação indisponível porque o cofre está numa versão antiga (v3/v4).
+     * Em v3: recupere via frase (PIN não é verificável).
+     * Em v4: use `upgradeIterations` (Configurações → Atualizar) antes.
+     */
     object LegacyVaultNoPepper : UnlockResult()
+
     object Aborted : UnlockResult()
     object RollbackDetected : UnlockResult()
-
-    /** Cofre já existe e é válido; `create()` recusou sobrescrever. */
     object VaultAlreadyExists : UnlockResult()
-
     data class Failure(val cause: Throwable) : UnlockResult()
 }
 
@@ -123,7 +131,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Leitura do envelope
+    // Leitura
     // ------------------------------------------------------------------
     private fun readEnvelope(): EnvelopeResult {
         if (!vaultFile.exists()) return EnvelopeResult.Missing
@@ -136,9 +144,7 @@ class Vault(
                 EnvelopeResult.Corrupt(
                     IllegalArgumentException("Versão não suportada: ${env.version}")
                 )
-            } else {
-                EnvelopeResult.Ok(env)
-            }
+            } else EnvelopeResult.Ok(env)
         } catch (t: Throwable) {
             EnvelopeResult.Corrupt(t)
         }
@@ -167,11 +173,22 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Derivação endurecida
+    // Derivação endurecida (PIN e frase)
     // ------------------------------------------------------------------
-    private fun derivePepperedPinKey(pin: CharArray, salt: ByteArray, iterations: Int): SecretKey {
+    /**
+     * Deriva chave de embrulho endurecida por hardware:
+     *   `HMAC-SHA256(pepper_keystore, PBKDF2(password, salt, iterations))`.
+     *
+     * Usada para PIN e frase-chave em vaults v5. Sem o pepper (TEE/StrongBox),
+     * a chave não pode ser derivada — brute force offline fica inviável.
+     */
+    private fun derivePepperedKey(
+        password: CharArray,
+        salt: ByteArray,
+        iterations: Int
+    ): SecretKey {
         if (!keystore.hasPepperKey()) throw IllegalStateException("Pepper key ausente")
-        val pbkdf2Bytes = Crypto.deriveBytes(pin, salt, iterations)
+        val pbkdf2Bytes = Crypto.deriveBytes(password, salt, iterations)
         try {
             val peppered = keystore.computePepperHmac(pbkdf2Bytes)
             return SecretKeySpec(peppered, "AES").also { peppered.fill(0) }
@@ -221,22 +238,12 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Criação
+    // Criação (v5 — pepper em ambos)
     // ------------------------------------------------------------------
     fun create(pin: CharArray, passphrase: CharArray): UnlockResult {
         try {
-            // 1) Recusa se já existe QUALQUER arquivo em vaultFile.
-            //    Se o arquivo existir mas estiver corrompido, o usuário precisa
-            //    apagá-lo manualmente (ou usar "esqueci tudo") — não sobrescrevemos
-            //    silenciosamente para não destruir dados potencialmente recuperáveis.
-            if (vaultFile.exists()) {
-                return UnlockResult.VaultAlreadyExists
-            }
-
-            // 2) Validações (não lançam: isStrongPin / isStrongPassphrase são puras)
-            if (!SecurityPolicy.isStrongPin(pin)) {
-                return UnlockResult.WrongCredential
-            }
+            if (vaultFile.exists()) return UnlockResult.VaultAlreadyExists
+            if (!SecurityPolicy.isStrongPin(pin)) return UnlockResult.WrongCredential
 
             val normalizedPhrase = SecurityPolicy.normalizePassphrase(passphrase)
             passphrase.fill('\u0000')
@@ -244,7 +251,6 @@ class Vault(
                 return UnlockResult.WrongCredential
             }
 
-            // 3) Pepper HMAC no Keystore
             try {
                 keystore.createPepperKey()
             } catch (t: Throwable) {
@@ -275,13 +281,13 @@ class Vault(
                 data = ""
             )
 
-            // 4) Derivações — cada uma pode lançar GeneralSecurityException.
-            //    O catch externo converte em Failure.
-            val kPin = derivePepperedPinKey(pin, saltPin, header.iterPin)
+            // ✅ PIN: peppered
+            val kPin = derivePepperedKey(pin, saltPin, header.iterPin)
 
+            // ✅ Frase: peppered também (v5)
             val phraseChars = normalizedPhrase.toCharArray()
             val kPhrase: SecretKey = try {
-                Crypto.derive(phraseChars, saltPhrase, header.iterPhrase)
+                derivePepperedKey(phraseChars, saltPhrase, header.iterPhrase)
             } finally {
                 phraseChars.fill('\u0000')
             }
@@ -305,7 +311,6 @@ class Vault(
                 data = dataCipher.toBase64()
             )
 
-            // 5) Gravação — IOException vira Failure, não propaga.
             try {
                 persistAtomicallyOrThrow(envelope)
             } catch (e: IOException) {
@@ -313,15 +318,11 @@ class Vault(
                 return UnlockResult.Failure(e)
             }
 
-            // 6) Publicação atômica
             val published = publishUnlocked(startGen, master, emptyList())
             master.fill(0)
 
             return if (published) UnlockResult.Success else UnlockResult.Aborted
         } catch (t: Throwable) {
-            // ✅ Rede de segurança: qualquer exceção não tratada acima
-            // (GeneralSecurityException, OOM, etc.) vira Failure em vez de
-            // derrubar o app. `finally` garante a limpeza dos buffers.
             return UnlockResult.Failure(t)
         } finally {
             pin.fill('\u0000')
@@ -330,7 +331,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Desbloqueio
+    // Desbloqueio por PIN
     // ------------------------------------------------------------------
     fun unlockPin(pin: CharArray): UnlockResult {
         val startGen = captureGeneration()
@@ -347,9 +348,10 @@ class Vault(
             val lastSeen = lockGuard.withLock { readLastSeenCounterLocked() }
             if (env.counter < lastSeen) return UnlockResult.RollbackDetected
 
+            // v4+: PIN sempre peppered
             val kPin: SecretKey = if (env.version >= 4) {
                 if (!keystore.hasPepperKey()) return UnlockResult.NoPepper
-                derivePepperedPinKey(pin, env.saltPin.base64(), env.iterPin)
+                derivePepperedKey(pin, env.saltPin.base64(), env.iterPin)
             } else {
                 return UnlockResult.LegacyVaultNoPepper
             }
@@ -393,6 +395,9 @@ class Vault(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Desbloqueio por frase
+    // ------------------------------------------------------------------
     fun unlockPhrase(phrase: CharArray): UnlockResult {
         val startGen = captureGeneration()
         try {
@@ -411,8 +416,16 @@ class Vault(
             val normalized = SecurityPolicy.normalizePassphrase(phrase)
             phrase.fill('\u0000')
             val phraseChars = normalized.toCharArray()
+
+            // ✅ v5+: peppered. v3/v4: legacy (para permitir upgrade).
             val kPh: SecretKey = try {
-                Crypto.derive(phraseChars, env.saltPhrase.base64(), env.iterPhrase)
+                when {
+                    env.version >= 5 -> {
+                        if (!keystore.hasPepperKey()) return UnlockResult.NoPepper
+                        derivePepperedKey(phraseChars, env.saltPhrase.base64(), env.iterPhrase)
+                    }
+                    else -> Crypto.derive(phraseChars, env.saltPhrase.base64(), env.iterPhrase)
+                }
             } finally {
                 phraseChars.fill('\u0000')
             }
@@ -454,6 +467,9 @@ class Vault(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Biometria
+    // ------------------------------------------------------------------
     fun unlockWithKeystoreCipher(cipher: Cipher): UnlockResult {
         val startGen = captureGeneration()
         return try {
@@ -497,9 +513,6 @@ class Vault(
         }
     }
 
-    // ------------------------------------------------------------------
-    // Biometria
-    // ------------------------------------------------------------------
     fun enrollBiometric(cipher: Cipher): UnlockResult {
         val master = lockGuard.withLock { keyBytes?.copyOf() }
             ?: return UnlockResult.Failure(IllegalStateException("Cofre trancado"))
@@ -583,7 +596,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Troca de credenciais
+    // Troca de PIN (funciona em v4 e v5 — PIN já é peppered em ambos)
     // ------------------------------------------------------------------
     fun changePin(currentPin: CharArray, newPin: CharArray): UnlockResult {
         val master = lockGuard.withLock { keyBytes?.copyOf() }
@@ -615,7 +628,7 @@ class Vault(
         if (!keystore.hasPepperKey()) return UnlockResult.NoPepper
 
         val masterKey = SecretKeySpec(master, "AES")
-        val kCurrent = derivePepperedPinKey(currentPin, env.saltPin.base64(), env.iterPin)
+        val kCurrent = derivePepperedKey(currentPin, env.saltPin.base64(), env.iterPin)
         try {
             val test = Crypto.decrypt(kCurrent, env.wrappedKeyPin.base64(), aadFor(env, "pin"))
             val ok = test.contentEquals(master)
@@ -627,7 +640,7 @@ class Vault(
 
         val newCounter = env.counter + 1
         val newEnv = env.copy(counter = newCounter)
-        val kNew = derivePepperedPinKey(newPin, env.saltPin.base64(), env.iterPin)
+        val kNew = derivePepperedKey(newPin, env.saltPin.base64(), env.iterPin)
         val newWrapped = Crypto.encrypt(kNew, master, aadFor(newEnv, "pin"))
 
         val dataPlain = Crypto.decrypt(masterKey, env.data.base64(), aadFor(env, "data", env.counter))
@@ -643,6 +656,9 @@ class Vault(
         return UnlockResult.Success
     }
 
+    // ------------------------------------------------------------------
+    // Troca de frase (exige v5 — se v4, retorna LegacyVaultNoPepper)
+    // ------------------------------------------------------------------
     fun changePassphrase(currentPhrase: CharArray, newPhrase: CharArray): UnlockResult {
         val master = lockGuard.withLock { keyBytes?.copyOf() }
             ?: return UnlockResult.Failure(IllegalStateException("Cofre trancado"))
@@ -673,11 +689,18 @@ class Vault(
             is EnvelopeResult.Ok -> r.envelope
         }
 
+        // ✅ v5 required: em v4 a frase é legacy, trocar sem upgrade
+        //    invalidaria o wrapper do PIN (AAD muda com a versão).
+        if (env.version < 5) return UnlockResult.LegacyVaultNoPepper
+        if (!keystore.hasPepperKey()) return UnlockResult.NoPepper
+
         val masterKey = SecretKeySpec(master, "AES")
+
+        // Verificar frase atual (peppered — v5)
         val normalizedCurrent = SecurityPolicy.normalizePassphrase(currentPhrase)
         val curChars = normalizedCurrent.toCharArray()
         val kCurrent: SecretKey = try {
-            Crypto.derive(curChars, env.saltPhrase.base64(), env.iterPhrase)
+            derivePepperedKey(curChars, env.saltPhrase.base64(), env.iterPhrase)
         } finally {
             curChars.fill('\u0000')
         }
@@ -694,7 +717,7 @@ class Vault(
         val newEnv = env.copy(counter = newCounter)
         val newChars = normalizedNew.toCharArray()
         val kNew: SecretKey = try {
-            Crypto.derive(newChars, env.saltPhrase.base64(), env.iterPhrase)
+            derivePepperedKey(newChars, env.saltPhrase.base64(), env.iterPhrase)
         } finally {
             newChars.fill('\u0000')
         }
@@ -713,9 +736,13 @@ class Vault(
         return UnlockResult.Success
     }
 
+    // ------------------------------------------------------------------
+    // Upgrade de iterações e versão (v3/v4 → v5 com pepper nos dois)
+    // ------------------------------------------------------------------
     fun needsIterationUpgrade(): Boolean {
         val r = readEnvelope() as? EnvelopeResult.Ok ?: return false
-        if (r.envelope.version < 4) return false
+        if (r.envelope.version < 4) return false // v3: precisa de recuperação manual
+        if (r.envelope.version < VaultEnvelope.CURRENT_VERSION) return true // v4 precisa virar v5
         return r.envelope.iterPin < SecurityPolicy.PBKDF2_ITERATIONS ||
             r.envelope.iterPhrase < SecurityPolicy.PBKDF2_ITERATIONS
     }
@@ -749,7 +776,8 @@ class Vault(
 
         val masterKey = SecretKeySpec(master, "AES")
 
-        val kPinOld = derivePepperedPinKey(currentPin, env.saltPin.base64(), env.iterPin)
+        // Verificar PIN (sempre peppered em v4+)
+        val kPinOld = derivePepperedKey(currentPin, env.saltPin.base64(), env.iterPin)
         try {
             val t = Crypto.decrypt(kPinOld, env.wrappedKeyPin.base64(), aadFor(env, "pin"))
             val ok = t.contentEquals(master)
@@ -759,10 +787,15 @@ class Vault(
             return UnlockResult.WrongCredential
         }
 
+        // Verificar frase: peppered em v5, legacy em v4
         val normPhrase = SecurityPolicy.normalizePassphrase(currentPhrase)
         val phChars = normPhrase.toCharArray()
         val kPhOld: SecretKey = try {
-            Crypto.derive(phChars, env.saltPhrase.base64(), env.iterPhrase)
+            if (env.version >= 5) {
+                derivePepperedKey(phChars, env.saltPhrase.base64(), env.iterPhrase)
+            } else {
+                Crypto.derive(phChars, env.saltPhrase.base64(), env.iterPhrase)
+            }
         } finally {
             phChars.fill('\u0000')
         }
@@ -781,6 +814,7 @@ class Vault(
         val newSaltPhrase = Crypto.randomBytes(SecurityPolicy.SALT_LENGTH_BYTES)
         val newCounter = env.counter + 1
         val newEnv = env.copy(
+            version = VaultEnvelope.CURRENT_VERSION,    // → v5
             counter = newCounter,
             iterPin = SecurityPolicy.PBKDF2_ITERATIONS,
             iterPhrase = SecurityPolicy.PBKDF2_ITERATIONS,
@@ -789,10 +823,11 @@ class Vault(
             wrappedKeyKeystore = null
         )
 
-        val kPinNew = derivePepperedPinKey(currentPin, newSaltPin, newEnv.iterPin)
+        // Re-wrap ambos peppered (v5)
+        val kPinNew = derivePepperedKey(currentPin, newSaltPin, newEnv.iterPin)
         val phChars2 = normPhrase.toCharArray()
         val kPhNew: SecretKey = try {
-            Crypto.derive(phChars2, newSaltPhrase, newEnv.iterPhrase)
+            derivePepperedKey(phChars2, newSaltPhrase, newEnv.iterPhrase)
         } finally {
             phChars2.fill('\u0000')
         }

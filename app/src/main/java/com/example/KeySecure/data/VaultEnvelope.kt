@@ -5,16 +5,19 @@ import kotlinx.serialization.Serializable
 /**
  * Envelope em disco.
  *
- * Mudanças de formato (v4):
- *  - `counter`: contador monotônico, incrementado em cada gravação.
- *    Incluído no AAD do campo `data`, então adulterar o contador quebra
- *    a decifra. Serve também como base para detecção de rollback via
- *    arquivo `.meta`.
- *  - AAD agora é prefixado com o papel (`pin|`, `phrase|`, `data|`,
- *    `keystore|`), evitando reuso entre contextos.
+ * Versão 5 (atual):
+ *  - PIN e frase-chave têm wrappers **ambos** endurecidos com HMAC do
+ *    Keystore (pepper). Sem o aparelho, nenhuma das duas credenciais
+ *    pode ser testada offline.
+ *  - `counter` monotônico para detecção de rollback (best-effort).
+ *  - AAD prefixado por papel (`pin|`, `phrase|`, `data|`, `keystore|`).
  *
- * `version` deve ser escrito **explicitamente** (`encodeDefaults = true`),
- * para que arquivos antigos nunca sejam lidos com um default novo.
+ * Versões anteriores:
+ *  - v4: pepper só no PIN; frase em PBKDF2 puro.
+ *  - v3: pré-pepper, apenas frase abre.
+ *
+ * `encodeDefaults = true` garante que `version` e `counter` sejam
+ * sempre escritos, mesmo quando iguais ao default.
  */
 @Serializable
 data class VaultEnvelope(
@@ -30,7 +33,7 @@ data class VaultEnvelope(
     val data: String
 ) {
     companion object {
-        const val CURRENT_VERSION = 4
+        const val CURRENT_VERSION = 5
         const val MIN_SUPPORTED_VERSION = 3
     }
 }
