@@ -1,5 +1,6 @@
 package com.example.KeySecure.crypto
 
+import android.os.Build
 import com.example.KeySecure.data.SecurityPolicy
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -16,6 +17,39 @@ object Crypto {
     fun randomBytes(size: Int): ByteArray =
         ByteArray(size).also { random.nextBytes(it) }
 
+    /**
+     * Escolhe o algoritmo de PBKDF2 disponível.
+     *
+     * - API 26+ (e JVM de testes, onde `SDK_INT == 0` é tratado como "moderno"):
+     *   `PBKDF2WithHmacSHA256`.
+     * - API 24–25: `PBKDF2WithHmacSHA1` (disponível desde API 10).
+     *
+     * O fallback é defesa em profundidade: com `minSdk = 26` ele nunca é
+     * exercitado em produção, mas cobre testes JVM e protege contra um
+     * eventual rebaixamento do `minSdk`.
+     */
+    private fun pbkdf2Algorithm(): String {
+        // `Build.VERSION.SDK_INT` é 0 no JVM de teste; tratamos como moderno.
+        val sdk = Build.VERSION.SDK_INT
+        return if (sdk == 0 || sdk >= Build.VERSION_CODES.O) {
+            "PBKDF2WithHmacSHA256"
+        } else {
+            "PBKDF2WithHmacSHA1"
+        }
+    }
+
+    /**
+     * Deriva bytes crus via PBKDF2.
+     *
+     * A saída é consumida pelo HMAC do Keystore (pepper) em
+     * `Vault.derivePepperedPinKey`; devolver `ByteArray` permite zerar
+     * o buffer após o uso.
+     *
+     * @param password  PIN/frase em CharArray (para permitir limpeza).
+     * @param salt      Salt aleatório.
+     * @param iterations Custo do PBKDF2.
+     * @param lengthBits Tamanho da saída em bits (padrão 256).
+     */
     fun deriveBytes(
         password: CharArray,
         salt: ByteArray,
@@ -24,7 +58,7 @@ object Crypto {
     ): ByteArray {
         val spec = PBEKeySpec(password, salt, iterations, lengthBits)
         return try {
-            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            SecretKeyFactory.getInstance(pbkdf2Algorithm())
                 .generateSecret(spec)
                 .encoded
         } finally {

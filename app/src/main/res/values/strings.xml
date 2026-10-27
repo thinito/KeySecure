@@ -84,6 +84,7 @@
     <string name="error_phrase_current_wrong">Frase atual incorreta</string>
     <string name="error_change_failed">Falha ao alterar credencial</string>
     <string name="error_rollback_detected">Arquivo do cofre é mais antigo que o esperado. Restaure um backup recente.</string>
+    <string name="error_vault_already_exists">Já existe um cofre neste dispositivo. Apague os dados do app para criar um novo.</string>
 
     <string name="action_save">Salvar</string>
     <string name="action_cancel">Cancelar</string>

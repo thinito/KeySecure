@@ -94,8 +94,8 @@ class VaultMigrationTest {
             "135790".toCharArray(),
             "outra frase boa 2024!".toCharArray()
         )
-        assertTrue("esperado Failure, veio $second",
-            second is UnlockResult.Failure)
+        assertTrue("esperado VaultAlreadyExists, veio $second",
+            second is UnlockResult.VaultAlreadyExists)
     }
 
     @Test

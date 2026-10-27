@@ -42,6 +42,7 @@ private sealed class UnlockOutcome {
     object LegacyVaultNoPepper : UnlockOutcome()
     object Aborted : UnlockOutcome()
     object RollbackDetected : UnlockOutcome()
+    object VaultAlreadyExists : UnlockOutcome()
     data class Failure(val cause: Throwable) : UnlockOutcome()
 }
 
@@ -69,6 +70,9 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Lockout
+    // ------------------------------------------------------------------
     private suspend fun refreshLockoutSuspend() {
         val remainMs = if (tracker.isLockedOut()) tracker.remainingMs() else 0L
         withContext(Dispatchers.Main) {
@@ -93,34 +97,50 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
     fun onPinChange(value: String) {
+        if (_state.value.isProcessing) return
         if (value.length <= SecurityPolicy.MAX_PIN_LENGTH && value.all { it in '0'..'9' }) {
             _state.update { it.copy(pin = value, error = null) }
         }
     }
 
     fun onPhraseChange(value: String) {
+        if (_state.value.isProcessing) return
         _state.update { it.copy(phrase = value, error = null) }
     }
 
     fun toggleUsePhrase() {
+        if (_state.value.isProcessing) return
         _state.update { it.copy(usePhrase = !it.usePhrase, error = null) }
     }
 
+    // ------------------------------------------------------------------
+    // Submit — trabalho pesado em Dispatchers.Default
+    // ------------------------------------------------------------------
     fun submit() {
         val s = _state.value
+        // Guarda dupla: isProcessing e isLocked. Ambas checadas antes de
+        // qualquer trabalho, para rejeitar cliques adicionais imediatamente.
         if (s.isProcessing || s.isLocked) return
+
+        // ✅ Marca isProcessing SÍNCRONO antes de lançar a coroutine.
+        // Se o usuário der dois toques em sequência rápida, o segundo
+        // submit() vê isProcessing == true e retorna — sem dupla derivação.
+        _state.update { it.copy(isProcessing = true, error = null) }
 
         submitJob?.cancel()
         submitJob = viewModelScope.launch {
-            _state.update { it.copy(isProcessing = true, error = null) }
-
             val usePhrase = s.usePhrase
             val pinSnapshot = s.pin
             val phraseSnapshot = s.phrase
             val pinChars = if (usePhrase) null else pinSnapshot.toCharArray()
             val phraseChars = if (usePhrase) phraseSnapshot.toCharArray() else null
 
+            // ✅ PBKDF2 (600k iterações) + decrypt + decode + migração
+            //    rodam em Dispatchers.Default. A UI fica livre.
             val outcome: UnlockOutcome = withContext(Dispatchers.Default) {
                 try {
                     if (usePhrase) {
@@ -143,6 +163,7 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 } catch (t: Throwable) {
+                    Log.e(TAG, "Falha inesperada no desbloqueio", t)
                     UnlockOutcome.Failure(t)
                 } finally {
                     pinChars?.fill('\u0000')
@@ -150,13 +171,13 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // Apenas WrongCredential conta tentativa falha.
+            // Registro de falha / reset só quando aplicável, em IO
             when (outcome) {
                 is UnlockOutcome.WrongCredential ->
                     withContext(Dispatchers.IO) { tracker.registerFailure() }
                 is UnlockOutcome.Success ->
                     withContext(Dispatchers.IO) { tracker.reset() }
-                else -> { /* Aborted, Locked, BadFormat etc: nada */ }
+                else -> { /* Locked/BadFormat/Aborted/etc: nada */ }
             }
 
             applyOutcome(outcome, usePhrase)
@@ -179,11 +200,11 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                         isProcessing = false
                     )
                 }
-                viewModelScope.launch { refreshLockoutSuspend() }
+                viewModelScope.launch(Dispatchers.IO) { refreshLockoutSuspend() }
             }
             is UnlockOutcome.Locked -> {
                 _state.update { it.copy(isProcessing = false) }
-                viewModelScope.launch { refreshLockoutSuspend() }
+                viewModelScope.launch(Dispatchers.IO) { refreshLockoutSuspend() }
             }
             is UnlockOutcome.BadFormat -> {
                 val msg = if (usePhrase) {
@@ -202,10 +223,7 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
             }
             is UnlockOutcome.NoVault -> {
                 _state.update {
-                    it.copy(
-                        error = app.getString(R.string.error_no_vault),
-                        isProcessing = false
-                    )
+                    it.copy(error = app.getString(R.string.error_no_vault), isProcessing = false)
                 }
             }
             is UnlockOutcome.CorruptedVault -> {
@@ -237,25 +255,30 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
-            is UnlockOutcome.Aborted -> {
-                // lock() concorrente (Home/screen-off/timeout). O cofre
-                // continua trancado e o collect em init já resetou o state.
-                _state.update { it.copy(isProcessing = false) }
-            }
-            is UnlockOutcome.Failure -> {
-                Log.e(TAG, "Falha inesperada no desbloqueio", outcome.cause)
-                _state.update {
-                    it.copy(
-                        error = app.getString(R.string.error_unexpected),
-                        isProcessing = false
-                    )
-                }
-            }
             is UnlockOutcome.RollbackDetected -> {
                 _state.update {
                     it.copy(
                         error = app.getString(R.string.error_rollback_detected),
                         vaultCorrupted = true,
+                        isProcessing = false
+                    )
+                }
+            }
+            is UnlockOutcome.VaultAlreadyExists -> {
+                _state.update {
+                    it.copy(
+                        error = app.getString(R.string.error_vault_already_exists),
+                        isProcessing = false
+                    )
+                }
+            }
+            is UnlockOutcome.Aborted -> {
+                _state.update { it.copy(isProcessing = false) }
+            }
+            is UnlockOutcome.Failure -> {
+                _state.update {
+                    it.copy(
+                        error = app.getString(R.string.error_unexpected),
                         isProcessing = false
                     )
                 }
@@ -283,5 +306,6 @@ private fun UnlockResult.toOutcome(): UnlockOutcome = when (this) {
     UnlockResult.LegacyVaultNoPepper -> UnlockOutcome.LegacyVaultNoPepper
     UnlockResult.Aborted -> UnlockOutcome.Aborted
     UnlockResult.RollbackDetected -> UnlockOutcome.RollbackDetected
+    UnlockResult.VaultAlreadyExists -> UnlockOutcome.VaultAlreadyExists
     is UnlockResult.Failure -> UnlockOutcome.Failure(cause)
 }

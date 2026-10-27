@@ -2,6 +2,7 @@ package com.example.KeySecure.ui
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.KeySecure.KeySecureApp
@@ -16,6 +17,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Estado de uma operação pesada (changePin / changePassphrase / upgradeIterations).
+ * Um único StateFlow atende os três diálogos, porque apenas um fica aberto por vez.
+ */
+data class VaultOpState(
+    val isProcessing: Boolean = false,
+    val error: String? = null,
+    val success: Boolean = false
+)
+
 class VaultViewModel(app: Application) : AndroidViewModel(app) {
 
     private val keyApp = app as KeySecureApp
@@ -27,6 +38,10 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+    // ✅ Estado das operações pesadas (changePin/Phrase/upgrade)
+    private val _opState = MutableStateFlow(VaultOpState())
+    val opState: StateFlow<VaultOpState> = _opState.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -58,68 +73,86 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
     fun lock() = vault.lock()
     fun clearError() { _lastError.value = null }
 
-    // ==================================================================
-    // Troca de credenciais
-    // ==================================================================
-    fun changePin(currentPin: String, newPin: String): Result<Unit> =
-        runVaultOp { vault.changePin(currentPin.toCharArray(), newPin.toCharArray()) }
-
-    fun changePassphrase(currentPhrase: String, newPhrase: String): Result<Unit> =
-        runVaultOp { vault.changePassphrase(currentPhrase.toCharArray(), newPhrase.toCharArray()) }
-
-    fun upgradeIterations(pin: String, phrase: String): Result<Unit> =
-        runVaultOp { vault.upgradeIterations(pin.toCharArray(), phrase.toCharArray()) }
-
     fun needsIterationUpgrade(): Boolean = vault.needsIterationUpgrade()
 
     // ==================================================================
-    // Helpers
+    // Operações pesadas — sempre em Dispatchers.Default
     // ==================================================================
-    private fun runVaultOp(op: () -> UnlockResult): Result<Unit> {
-        val app = getApplication<Application>()
-        return when (val result = op()) {
-            is UnlockResult.Success -> {
-                viewModelScope.launch(Dispatchers.IO) { tracker.reset() }
-                Result.success(Unit)
-            }
-            is UnlockResult.WrongCredential -> {
-                val msg = app.getString(R.string.error_wrong_credential)
-                _lastError.value = msg
-                Result.failure(IllegalArgumentException(msg))
-            }
-            is UnlockResult.NoVault -> {
-                val msg = app.getString(R.string.error_no_vault)
-                _lastError.value = msg
-                Result.failure(IllegalStateException(msg))
-            }
-            is UnlockResult.CorruptedVault -> {
-                val msg = app.getString(R.string.error_vault_corrupted)
-                _lastError.value = msg
-                Result.failure(IllegalStateException(msg))
-            }
-            is UnlockResult.NoPepper -> {
-                val msg = app.getString(R.string.error_no_pepper)
-                _lastError.value = msg
-                Result.failure(IllegalStateException(msg))
-            }
-            is UnlockResult.LegacyVaultNoPepper -> {
-                val msg = app.getString(R.string.error_legacy_vault)
-                _lastError.value = msg
-                Result.failure(IllegalStateException(msg))
-            }
-            // rollback detectado
-            is UnlockResult.RollbackDetected -> {
-                val msg = app.getString(R.string.error_rollback_detected)
-                _lastError.value = msg
-                Result.failure(IllegalStateException(msg))
-            }
-            is UnlockResult.Aborted -> Result.failure(IllegalStateException("Abortado"))
-            is UnlockResult.Failure -> {
-                _lastError.value = result.cause.message ?: "Erro"
-                Result.failure(result.cause)
-            }
+
+    /** Limpa o estado antes de abrir um novo diálogo. */
+    fun resetOpState() {
+        _opState.value = VaultOpState()
+    }
+
+    fun changePin(current: String, new: String) {
+        runVaultOp(R.string.error_change_failed) {
+            vault.changePin(current.toCharArray(), new.toCharArray())
         }
     }
+
+    fun changePassphrase(current: String, new: String) {
+        runVaultOp(R.string.error_change_failed) {
+            vault.changePassphrase(current.toCharArray(), new.toCharArray())
+        }
+    }
+
+    fun upgradeIterations(pin: String, phrase: String) {
+        runVaultOp(R.string.error_change_failed) {
+            vault.upgradeIterations(pin.toCharArray(), phrase.toCharArray())
+        }
+    }
+
+    /**
+     * Executa `op` em Dispatchers.Default — PBKDF2 (600k iterações) +
+     * read/decrypt/migrate/persist ficam fora do main thread.
+     * `isProcessing` é setado **sincronamente** antes do launch,
+     * impedindo duplo toque disparar duas derivações.
+     */
+    private fun runVaultOp(genericErrorRes: Int, op: () -> UnlockResult) {
+        if (_opState.value.isProcessing) return
+        val app = getApplication<Application>()
+        _opState.value = VaultOpState(isProcessing = true)
+
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.Default) {
+                try {
+                    op()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Falha inesperada em operação do cofre", t)
+                    UnlockResult.Failure(t)
+                }
+            }
+
+            val newState = when (result) {
+                is UnlockResult.Success -> {
+                    withContext(Dispatchers.IO) { runCatching { tracker.reset() } }
+                    VaultOpState(success = true)
+                }
+                is UnlockResult.WrongCredential ->
+                    VaultOpState(error = app.getString(R.string.error_wrong_credential))
+                is UnlockResult.NoPepper ->
+                    VaultOpState(error = app.getString(R.string.error_no_pepper))
+                is UnlockResult.LegacyVaultNoPepper ->
+                    VaultOpState(error = app.getString(R.string.error_legacy_vault))
+                is UnlockResult.VaultAlreadyExists ->
+                    VaultOpState(error = app.getString(R.string.error_vault_already_exists))
+                is UnlockResult.RollbackDetected ->
+                    VaultOpState(error = app.getString(R.string.error_rollback_detected))
+                is UnlockResult.CorruptedVault ->
+                    VaultOpState(error = app.getString(R.string.error_vault_corrupted))
+                is UnlockResult.NoVault ->
+                    VaultOpState(error = app.getString(R.string.error_no_vault))
+                is UnlockResult.Aborted ->
+                    VaultOpState(error = app.getString(genericErrorRes))
+                is UnlockResult.Failure -> {
+                    Log.e(TAG, "Falha em operação do cofre", result.cause)
+                    VaultOpState(error = app.getString(genericErrorRes))
+                }
+            }
+            _opState.value = newState
+        }
+    }
+
     private fun handle(result: Result<*>) {
         result.onSuccess {
             _lastError.value = null
@@ -127,5 +160,9 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
         }.onFailure {
             _lastError.value = it.message ?: it.javaClass.simpleName
         }
+    }
+
+    private companion object {
+        private const val TAG = "VaultViewModel"
     }
 }

@@ -1,7 +1,6 @@
 package com.example.KeySecure
 
 import android.os.Build
-import androidx.annotation.RequiresApi
 import com.example.KeySecure.crypto.Crypto
 import com.example.KeySecure.crypto.IKeystore
 import com.example.KeySecure.crypto.KeystoreManager
@@ -39,6 +38,10 @@ sealed class UnlockResult {
     object LegacyVaultNoPepper : UnlockResult()
     object Aborted : UnlockResult()
     object RollbackDetected : UnlockResult()
+
+    /** Cofre já existe e é válido; `create()` recusou sobrescrever. */
+    object VaultAlreadyExists : UnlockResult()
+
     data class Failure(val cause: Throwable) : UnlockResult()
 }
 
@@ -120,7 +123,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Leitura
+    // Leitura do envelope
     // ------------------------------------------------------------------
     private fun readEnvelope(): EnvelopeResult {
         if (!vaultFile.exists()) return EnvelopeResult.Missing
@@ -131,11 +134,11 @@ class Vault(
                 env.version > VaultEnvelope.CURRENT_VERSION
             ) {
                 EnvelopeResult.Corrupt(
-                    IllegalArgumentException(
-                        "Versão não suportada: ${env.version}"
-                    )
+                    IllegalArgumentException("Versão não suportada: ${env.version}")
                 )
-            } else EnvelopeResult.Ok(env)
+            } else {
+                EnvelopeResult.Ok(env)
+            }
         } catch (t: Throwable) {
             EnvelopeResult.Corrupt(t)
         }
@@ -222,10 +225,18 @@ class Vault(
     // ------------------------------------------------------------------
     fun create(pin: CharArray, passphrase: CharArray): UnlockResult {
         try {
-            if (vaultFile.exists()) return UnlockResult.Failure(
-                IllegalStateException("Cofre já existe")
-            )
-            if (!SecurityPolicy.isStrongPin(pin)) return UnlockResult.WrongCredential
+            // 1) Recusa se já existe QUALQUER arquivo em vaultFile.
+            //    Se o arquivo existir mas estiver corrompido, o usuário precisa
+            //    apagá-lo manualmente (ou usar "esqueci tudo") — não sobrescrevemos
+            //    silenciosamente para não destruir dados potencialmente recuperáveis.
+            if (vaultFile.exists()) {
+                return UnlockResult.VaultAlreadyExists
+            }
+
+            // 2) Validações (não lançam: isStrongPin / isStrongPassphrase são puras)
+            if (!SecurityPolicy.isStrongPin(pin)) {
+                return UnlockResult.WrongCredential
+            }
 
             val normalizedPhrase = SecurityPolicy.normalizePassphrase(passphrase)
             passphrase.fill('\u0000')
@@ -233,11 +244,15 @@ class Vault(
                 return UnlockResult.WrongCredential
             }
 
+            // 3) Pepper HMAC no Keystore
             try {
                 keystore.createPepperKey()
             } catch (t: Throwable) {
                 return UnlockResult.Failure(
-                    IllegalStateException("Dispositivo não suporta proteção de hardware do PIN.", t)
+                    IllegalStateException(
+                        "Dispositivo não suporta proteção de hardware do PIN.",
+                        t
+                    )
                 )
             }
 
@@ -260,7 +275,10 @@ class Vault(
                 data = ""
             )
 
+            // 4) Derivações — cada uma pode lançar GeneralSecurityException.
+            //    O catch externo converte em Failure.
             val kPin = derivePepperedPinKey(pin, saltPin, header.iterPin)
+
             val phraseChars = normalizedPhrase.toCharArray()
             val kPhrase: SecretKey = try {
                 Crypto.derive(phraseChars, saltPhrase, header.iterPhrase)
@@ -276,7 +294,9 @@ class Vault(
                 emptyList<VaultEntry>()
             )
             val dataCipher = Crypto.encrypt(
-                masterKey, emptyJson.toByteArray(), aadFor(header, "data", header.counter)
+                masterKey,
+                emptyJson.toByteArray(),
+                aadFor(header, "data", header.counter)
             )
 
             val envelope = header.copy(
@@ -285,15 +305,24 @@ class Vault(
                 data = dataCipher.toBase64()
             )
 
+            // 5) Gravação — IOException vira Failure, não propaga.
             try {
                 persistAtomicallyOrThrow(envelope)
             } catch (e: IOException) {
+                master.fill(0)
                 return UnlockResult.Failure(e)
             }
 
+            // 6) Publicação atômica
             val published = publishUnlocked(startGen, master, emptyList())
             master.fill(0)
+
             return if (published) UnlockResult.Success else UnlockResult.Aborted
+        } catch (t: Throwable) {
+            // ✅ Rede de segurança: qualquer exceção não tratada acima
+            // (GeneralSecurityException, OOM, etc.) vira Failure em vez de
+            // derrubar o app. `finally` garante a limpeza dos buffers.
+            return UnlockResult.Failure(t)
         } finally {
             pin.fill('\u0000')
             passphrase.fill('\u0000')
@@ -311,7 +340,9 @@ class Vault(
                 is EnvelopeResult.Corrupt -> return UnlockResult.CorruptedVault
                 is EnvelopeResult.Ok -> r.envelope
             }
-            if (!SecurityPolicy.validateIterations(env.iterPin)) return UnlockResult.CorruptedVault
+            if (!SecurityPolicy.validateIterations(env.iterPin)) {
+                return UnlockResult.CorruptedVault
+            }
 
             val lastSeen = lockGuard.withLock { readLastSeenCounterLocked() }
             if (env.counter < lastSeen) return UnlockResult.RollbackDetected
@@ -319,9 +350,13 @@ class Vault(
             val kPin: SecretKey = if (env.version >= 4) {
                 if (!keystore.hasPepperKey()) return UnlockResult.NoPepper
                 derivePepperedPinKey(pin, env.saltPin.base64(), env.iterPin)
-            } else return UnlockResult.LegacyVaultNoPepper
+            } else {
+                return UnlockResult.LegacyVaultNoPepper
+            }
 
-            if (lockGuard.withLock { generation != startGen }) return UnlockResult.Aborted
+            if (lockGuard.withLock { generation != startGen }) {
+                return UnlockResult.Aborted
+            }
 
             val master = Crypto.decrypt(kPin, env.wrappedKeyPin.base64(), aadFor(env, "pin"))
             val masterKey = SecretKeySpec(master, "AES")
@@ -329,7 +364,8 @@ class Vault(
             val loaded0 = try {
                 decodeEntries(masterKey, env)
             } catch (t: Throwable) {
-                master.fill(0); return UnlockResult.CorruptedVault
+                master.fill(0)
+                return UnlockResult.CorruptedVault
             }
 
             val (loaded, finalEnv) = migrateEntriesIfNeeded(loaded0, masterKey, env)
@@ -339,7 +375,9 @@ class Vault(
             return if (published) {
                 onPersistSuccess(finalEnv.counter)
                 UnlockResult.Success
-            } else UnlockResult.Aborted
+            } else {
+                UnlockResult.Aborted
+            }
         } catch (e: javax.crypto.AEADBadTagException) {
             return UnlockResult.WrongCredential
         } catch (e: IllegalArgumentException) {
@@ -363,7 +401,9 @@ class Vault(
                 is EnvelopeResult.Corrupt -> return UnlockResult.CorruptedVault
                 is EnvelopeResult.Ok -> r.envelope
             }
-            if (!SecurityPolicy.validateIterations(env.iterPhrase)) return UnlockResult.CorruptedVault
+            if (!SecurityPolicy.validateIterations(env.iterPhrase)) {
+                return UnlockResult.CorruptedVault
+            }
 
             val lastSeen = lockGuard.withLock { readLastSeenCounterLocked() }
             if (env.counter < lastSeen) return UnlockResult.RollbackDetected
@@ -377,7 +417,9 @@ class Vault(
                 phraseChars.fill('\u0000')
             }
 
-            if (lockGuard.withLock { generation != startGen }) return UnlockResult.Aborted
+            if (lockGuard.withLock { generation != startGen }) {
+                return UnlockResult.Aborted
+            }
 
             val master = Crypto.decrypt(kPh, env.wrappedKeyPhrase.base64(), aadFor(env, "phrase"))
             val masterKey = SecretKeySpec(master, "AES")
@@ -385,7 +427,8 @@ class Vault(
             val loaded0 = try {
                 decodeEntries(masterKey, env)
             } catch (t: Throwable) {
-                master.fill(0); return UnlockResult.CorruptedVault
+                master.fill(0)
+                return UnlockResult.CorruptedVault
             }
 
             val (loaded, finalEnv) = migrateEntriesIfNeeded(loaded0, masterKey, env)
@@ -395,7 +438,9 @@ class Vault(
             return if (published) {
                 onPersistSuccess(finalEnv.counter)
                 UnlockResult.Success
-            } else UnlockResult.Aborted
+            } else {
+                UnlockResult.Aborted
+            }
         } catch (e: javax.crypto.AEADBadTagException) {
             return UnlockResult.WrongCredential
         } catch (e: IllegalArgumentException) {
@@ -431,7 +476,8 @@ class Vault(
             val loaded0 = try {
                 decodeEntries(masterKey, env)
             } catch (t: Throwable) {
-                master.fill(0); return UnlockResult.CorruptedVault
+                master.fill(0)
+                return UnlockResult.CorruptedVault
             }
 
             val (loaded, finalEnv) = migrateEntriesIfNeeded(loaded0, masterKey, env)
@@ -441,7 +487,9 @@ class Vault(
             if (published) {
                 onPersistSuccess(finalEnv.counter)
                 UnlockResult.Success
-            } else UnlockResult.Aborted
+            } else {
+                UnlockResult.Aborted
+            }
         } catch (e: GeneralSecurityException) {
             UnlockResult.WrongCredential
         } catch (e: Exception) {
@@ -450,7 +498,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Biometria — enrollment e disable
+    // Biometria
     // ------------------------------------------------------------------
     fun enrollBiometric(cipher: Cipher): UnlockResult {
         val master = lockGuard.withLock { keyBytes?.copyOf() }
@@ -499,7 +547,8 @@ class Vault(
     fun getBiometricIv(): ByteArray? {
         val r = readEnvelope() as? EnvelopeResult.Ok ?: return null
         val wrapped = r.envelope.wrappedKeyKeystore
-            ?.let { runCatching { it.base64() }.getOrNull() } ?: return null
+            ?.let { runCatching { it.base64() }.getOrNull() }
+            ?: return null
         return if (wrapped.size >= 12) wrapped.copyOfRange(0, 12) else null
     }
 
@@ -700,17 +749,16 @@ class Vault(
 
         val masterKey = SecretKeySpec(master, "AES")
 
-        // Verifica PIN atual
         val kPinOld = derivePepperedPinKey(currentPin, env.saltPin.base64(), env.iterPin)
         try {
             val t = Crypto.decrypt(kPinOld, env.wrappedKeyPin.base64(), aadFor(env, "pin"))
-            val ok = t.contentEquals(master); t.fill(0)
+            val ok = t.contentEquals(master)
+            t.fill(0)
             if (!ok) return UnlockResult.WrongCredential
         } catch (e: GeneralSecurityException) {
             return UnlockResult.WrongCredential
         }
 
-        // Verifica frase atual
         val normPhrase = SecurityPolicy.normalizePassphrase(currentPhrase)
         val phChars = normPhrase.toCharArray()
         val kPhOld: SecretKey = try {
@@ -720,7 +768,8 @@ class Vault(
         }
         try {
             val t = Crypto.decrypt(kPhOld, env.wrappedKeyPhrase.base64(), aadFor(env, "phrase"))
-            val ok = t.contentEquals(master); t.fill(0)
+            val ok = t.contentEquals(master)
+            t.fill(0)
             if (!ok) return UnlockResult.WrongCredential
         } catch (e: GeneralSecurityException) {
             return UnlockResult.WrongCredential
@@ -782,8 +831,11 @@ class Vault(
                 val now = System.currentTimeMillis()
                 val entry = VaultEntry(
                     id = UUID.randomUUID().toString(),
-                    name = name.trim(), user = user.trim(), pass = pass,
-                    createdAt = now, updatedAt = now
+                    name = name.trim(),
+                    user = user.trim(),
+                    pass = pass,
+                    createdAt = now,
+                    updatedAt = now
                 )
                 val newList = entries + entry
                 persistEntriesOrThrow(newList)
@@ -802,7 +854,9 @@ class Vault(
                     Result.failure(NoSuchElementException("Entrada não encontrada: $id"))
                 } else {
                     val updated = entries[idx].copy(
-                        name = name.trim(), user = user.trim(), pass = pass,
+                        name = name.trim(),
+                        user = user.trim(),
+                        pass = pass,
                         updatedAt = System.currentTimeMillis()
                     )
                     val newList = entries.toMutableList().also { it[idx] = updated }
@@ -848,13 +902,11 @@ class Vault(
         persistAtomicallyOrThrow(newEnv.copy(data = cipher.toBase64()))
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     private fun persistAtomicallyOrThrow(env: VaultEnvelope) {
         val parent = vaultFile.parentFile
             ?: throw IOException("Diretório inválido: ${vaultFile.absolutePath}")
         val tmp = File(parent, "${vaultFile.name}.tmp")
 
-        // 1) Escreve tmp com fsync
         try {
             FileOutputStream(tmp).use { fos ->
                 fos.write(json.encodeToString(VaultEnvelope.serializer(), env).toByteArray())
@@ -866,21 +918,18 @@ class Vault(
             throw IOException("Falha ao escrever tmp: ${tmp.absolutePath}", e)
         }
 
-        // 2) Move atomicamente. `Files` existe em API 26+ e no teste JVM.
-        //    Detectamos via try/NoClassDefFoundError para não depender de
-        //    Build.VERSION.SDK_INT (que é 0 no JVM de teste).
         try {
-            // Tenta com ATOMIC_MOVE + REPLACE_EXISTING (mais forte).
             Files.move(
-                tmp.toPath(), vaultFile.toPath(),
+                tmp.toPath(),
+                vaultFile.toPath(),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING
             )
         } catch (e: AtomicMoveNotSupportedException) {
-            // Sistema de arquivos não suporta ATOMIC_MOVE: usa REPLACE_EXISTING.
             try {
                 Files.move(
-                    tmp.toPath(), vaultFile.toPath(),
+                    tmp.toPath(),
+                    vaultFile.toPath(),
                     StandardCopyOption.REPLACE_EXISTING
                 )
             } catch (e2: Exception) {
@@ -888,8 +937,6 @@ class Vault(
                 throw IOException("Falha ao mover tmp: ${tmp.absolutePath}", e2)
             }
         } catch (e: NoClassDefFoundError) {
-            // API < 26: `java.nio.file.Files` não está disponível.
-            // Fallback NÃO atômico: apaga o destino antes do rename.
             try {
                 if (vaultFile.exists() && !vaultFile.delete()) {
                     throw IOException("Falha ao remover vault.json antigo")
@@ -906,10 +953,8 @@ class Vault(
             throw IOException("Falha ao mover tmp: ${tmp.absolutePath}", e)
         }
 
-        // 3) Remove .bak legado (retinha senhas excluídas)
         runCatching { File(parent, "${vaultFile.name}.bak").delete() }
 
-        // 4) Sanidade
         if (!vaultFile.exists()) {
             throw IOException("vault.json ausente após gravação")
         }
