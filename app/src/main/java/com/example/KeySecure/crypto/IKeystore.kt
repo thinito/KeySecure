@@ -21,6 +21,7 @@ interface IKeystore {
     // --- Pepper HMAC (sem autenticação, não exportável) ---
     fun hasPepperKey(): Boolean
     fun createPepperKey()
+    fun getPepperSecurityLevel(): PepperSecurityLevel?
 
     /** HMAC-SHA256(pepper_key, data). */
     fun computePepperHmac(data: ByteArray): ByteArray

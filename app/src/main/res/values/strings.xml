@@ -10,6 +10,7 @@
     <string name="setup_confirm_phrase_hint">Confirmar frase-chave</string>
     <string name="setup_confirm">Criar</string>
     <string name="setup_creating">Criando…</string>
+    <string name="setup_generate_diceware">Gerar frase segura (Diceware)</string>
 
     <!-- Unlock -->
     <string name="unlock_title">Desbloquear Cofre</string>
@@ -33,6 +34,7 @@
     <string name="vault_copied_toast">Senha copiada (será apagada em 30s)</string>
 
     <string name="tapjacking_blocked">Toque bloqueado: há uma janela sobreposta na tela.</string>
+    
 
     <!-- Erros — TODOS os textos de erro da UI vêm daqui -->
     <string name="error_pin_format">PIN deve ter entre %1$d e %2$d dígitos</string>
@@ -91,4 +93,15 @@
     <string name="action_save">Salvar</string>
     <string name="action_cancel">Cancelar</string>
     <string name="action_close">Fechar</string>
+
+        <!-- Logs -->
+    <string name="settings_logs_section">Logs de diagnóstico</string>
+    <string name="settings_share_logs">Compartilhar logs</string>
+    <string name="settings_show_log_path">Mostrar caminho dos logs</string>
+    <string name="settings_clear_logs">Limpar logs</string>
+    <string name="settings_clear_logs_confirm">Apagar todos os logs?</string>
+    <string name="settings_clear_logs_message">Os arquivos de log serão removidos permanentemente.</string>
+    <string name="settings_logs_cleared">Logs apagados</string>
+    <string name="settings_log_path_title">Caminho dos logs</string>
+    <string name="settings_log_path_hint">Acesse via USB em:\n\n%1$s\n\nOu use ADB:\nadb pull %1$s</string>
 </resources>

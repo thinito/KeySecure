@@ -1,13 +1,14 @@
 package com.example.KeySecure.ui
 
 import android.app.Application
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.KeySecure.KeySecureApp
 import com.example.KeySecure.R
 import com.example.KeySecure.UnlockResult
 import com.example.KeySecure.data.SecurityPolicy
+import com.example.KeySecure.data.VaultState
+import com.example.KeySecure.util.SafeLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -49,7 +50,7 @@ private sealed class UnlockOutcome {
 class UnlockViewModel(app: Application) : AndroidViewModel(app) {
 
     private val keyApp = app as KeySecureApp
-    private val vault = keyApp.vault
+    private val vaultRepository = keyApp.vaultRepository
     private val tracker = keyApp.attemptTracker
 
     private val _state = MutableStateFlow(UnlockState())
@@ -61,8 +62,8 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch(Dispatchers.IO) { refreshLockoutSuspend() }
         viewModelScope.launch {
-            vault.unlocked.collect { isUnlocked ->
-                if (!isUnlocked) {
+            vaultRepository.state.collect { s ->
+                if (s !is VaultState.Unlocked) {
                     countdownJob?.cancel()
                     _state.value = UnlockState()
                 }
@@ -70,9 +71,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Lockout
-    // ------------------------------------------------------------------
     private suspend fun refreshLockoutSuspend() {
         val remainMs = if (tracker.isLockedOut()) tracker.remainingMs() else 0L
         withContext(Dispatchers.Main) {
@@ -97,9 +95,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Input
-    // ------------------------------------------------------------------
     fun onPinChange(value: String) {
         if (_state.value.isProcessing) return
         if (value.length <= SecurityPolicy.MAX_PIN_LENGTH && value.all { it in '0'..'9' }) {
@@ -117,18 +112,10 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(usePhrase = !it.usePhrase, error = null) }
     }
 
-    // ------------------------------------------------------------------
-    // Submit — trabalho pesado em Dispatchers.Default
-    // ------------------------------------------------------------------
     fun submit() {
         val s = _state.value
-        // Guarda dupla: isProcessing e isLocked. Ambas checadas antes de
-        // qualquer trabalho, para rejeitar cliques adicionais imediatamente.
         if (s.isProcessing || s.isLocked) return
 
-        // ✅ Marca isProcessing SÍNCRONO antes de lançar a coroutine.
-        // Se o usuário der dois toques em sequência rápida, o segundo
-        // submit() vê isProcessing == true e retorna — sem dupla derivação.
         _state.update { it.copy(isProcessing = true, error = null) }
 
         submitJob?.cancel()
@@ -139,8 +126,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
             val pinChars = if (usePhrase) null else pinSnapshot.toCharArray()
             val phraseChars = if (usePhrase) phraseSnapshot.toCharArray() else null
 
-            // ✅ PBKDF2 (600k iterações) + decrypt + decode + migração
-            //    rodam em Dispatchers.Default. A UI fica livre.
             val outcome: UnlockOutcome = withContext(Dispatchers.Default) {
                 try {
                     if (usePhrase) {
@@ -150,7 +135,7 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                             tracker.isLockedOut() ->
                                 UnlockOutcome.Locked
                             else ->
-                                vault.unlockPhrase(phraseChars!!).toOutcome()
+                                vaultRepository.unlockPhrase(phraseChars!!).toOutcome()
                         }
                     } else {
                         when {
@@ -159,11 +144,11 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                             tracker.isLockedOut() ->
                                 UnlockOutcome.Locked
                             else ->
-                                vault.unlockPin(pinChars!!).toOutcome()
+                                vaultRepository.unlockPin(pinChars!!).toOutcome()
                         }
                     }
                 } catch (t: Throwable) {
-                    Log.e(TAG, "Falha inesperada no desbloqueio", t)
+                    SafeLog.e(TAG, "Falha inesperada no desbloqueio", t)
                     UnlockOutcome.Failure(t)
                 } finally {
                     pinChars?.fill('\u0000')
@@ -171,7 +156,6 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // Registro de falha / reset só quando aplicável, em IO
             when (outcome) {
                 is UnlockOutcome.WrongCredential ->
                     withContext(Dispatchers.IO) { tracker.registerFailure() }
@@ -276,6 +260,7 @@ class UnlockViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(isProcessing = false) }
             }
             is UnlockOutcome.Failure -> {
+                SafeLog.e(TAG, "Desbloqueio falhou por exceção inesperada", outcome.cause)
                 _state.update {
                     it.copy(
                         error = app.getString(R.string.error_unexpected),

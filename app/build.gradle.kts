@@ -48,6 +48,7 @@ kotlin {
 
 dependencies {
     implementation(libs.junit.junit)
+    testImplementation(libs.androidx.runner)
     val composeBom = platform("androidx.compose:compose-bom:2024.09.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
@@ -73,13 +74,13 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
-    // Biometria (item 5)
+    // Biometria 
     implementation("androidx.biometric:biometric:1.1.0")
 
     // WorkManager (necessário para ClipboardUtil)
     implementation("androidx.work:work-runtime-ktx:2.9.1")
 
-    // Testes unitários (JVM) — precisam destas linhas
+    // Testes unitários (JVM)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
@@ -88,4 +89,10 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+
+    // zxcvbn4j — estimador de força de senha (porta Java do zxcvbn)
+    implementation("com.nulab-inc:zxcvbn:1.5.0")
+
+    // argon2kt — binding Android para Argon2id
+    implementation("com.lambdapioneer.argon2kt:argon2kt:1.6.0")
 }

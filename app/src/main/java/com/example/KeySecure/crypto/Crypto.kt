@@ -1,7 +1,8 @@
 package com.example.KeySecure.crypto
 
-import android.os.Build
 import com.example.KeySecure.data.SecurityPolicy
+import com.lambdapioneer.argon2kt.Argon2Kt
+import com.lambdapioneer.argon2kt.Argon2Mode
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
@@ -14,43 +15,20 @@ object Crypto {
 
     private val random = SecureRandom()
 
+    /**
+     * ✅ `by lazy`: `Argon2Kt()` carrega a biblioteca nativa via JNI, que
+     * **não existe na JVM de testes unitários**. Com lazy, qualquer código
+     * que use só PBKDF2 (como `CryptoTest`) não toca em Argon2.
+     */
+    private val argon2 by lazy { Argon2Kt() }
+
     fun randomBytes(size: Int): ByteArray =
         ByteArray(size).also { random.nextBytes(it) }
 
-    /**
-     * Escolhe o algoritmo de PBKDF2 disponível.
-     *
-     * - API 26+ (e JVM de testes, onde `SDK_INT == 0` é tratado como "moderno"):
-     *   `PBKDF2WithHmacSHA256`.
-     * - API 24–25: `PBKDF2WithHmacSHA1` (disponível desde API 10).
-     *
-     * O fallback é defesa em profundidade: com `minSdk = 26` ele nunca é
-     * exercitado em produção, mas cobre testes JVM e protege contra um
-     * eventual rebaixamento do `minSdk`.
-     */
-    private fun pbkdf2Algorithm(): String {
-        // `Build.VERSION.SDK_INT` é 0 no JVM de teste; tratamos como moderno.
-        val sdk = Build.VERSION.SDK_INT
-        return if (sdk == 0 || sdk >= Build.VERSION_CODES.O) {
-            "PBKDF2WithHmacSHA256"
-        } else {
-            "PBKDF2WithHmacSHA1"
-        }
-    }
-
-    /**
-     * Deriva bytes crus via PBKDF2.
-     *
-     * A saída é consumida pelo HMAC do Keystore (pepper) em
-     * `Vault.derivePepperedPinKey`; devolver `ByteArray` permite zerar
-     * o buffer após o uso.
-     *
-     * @param password  PIN/frase em CharArray (para permitir limpeza).
-     * @param salt      Salt aleatório.
-     * @param iterations Custo do PBKDF2.
-     * @param lengthBits Tamanho da saída em bits (padrão 256).
-     */
-    fun deriveBytes(
+    // ------------------------------------------------------------------
+    // PBKDF2
+    // ------------------------------------------------------------------
+    fun deriveBytesPbkdf2(
         password: CharArray,
         salt: ByteArray,
         iterations: Int = SecurityPolicy.PBKDF2_ITERATIONS,
@@ -66,19 +44,43 @@ object Crypto {
         }
     }
 
-    /**
-     * Deriva chave AES-256 via PBKDF2.
-     *
-     * O `ByteArray` retornado por [deriveBytes] é zerado logo após o
-     * `SecretKeySpec` (que clona internamente) ser construído — o
-     * array original não fica pendurado até o GC.
-     */
-    fun derive(
+    // ------------------------------------------------------------------
+    // Argon2id (usa JNI — só em dispositivo/emulador)
+    // ------------------------------------------------------------------
+    fun deriveBytesArgon2id(
         password: CharArray,
         salt: ByteArray,
+        memoryKib: Int = SecurityPolicy.ARGON2_MEMORY_KIB,
+        iterations: Int = SecurityPolicy.ARGON2_ITERATIONS,
+        parallelism: Int = SecurityPolicy.ARGON2_PARALLELISM
+    ): ByteArray {
+        val passwordBytes = String(password).toByteArray(Charsets.UTF_8)
+        try {
+            val result = argon2.hash(
+                mode = Argon2Mode.ARGON2_ID,
+                password = passwordBytes,
+                salt = salt,
+                tCostInIterations = iterations,
+                mCostInKibibyte = memoryKib,
+                parallelism = parallelism,
+                hashLengthInBytes = 32
+            )
+            return result.rawHashAsByteArray()
+        } finally {
+            passwordBytes.fill(0)
+        }
+    }
+
+    fun deriveKey(
+        password: CharArray,
+        salt: ByteArray,
+        kdf: String,
         iterations: Int = SecurityPolicy.PBKDF2_ITERATIONS
     ): SecretKey {
-        val bytes = deriveBytes(password, salt, iterations)
+        val bytes = when (kdf) {
+            "ARGON2ID" -> deriveBytesArgon2id(password, salt)
+            else -> deriveBytesPbkdf2(password, salt, iterations)
+        }
         return try {
             SecretKeySpec(bytes, "AES")
         } finally {
@@ -86,6 +88,9 @@ object Crypto {
         }
     }
 
+    // ------------------------------------------------------------------
+    // AES-GCM
+    // ------------------------------------------------------------------
     fun encrypt(key: SecretKey, plaintext: ByteArray, aad: ByteArray? = null): ByteArray {
         val iv = randomBytes(SecurityPolicy.IV_LENGTH_BYTES)
         val c = Cipher.getInstance("AES/GCM/NoPadding")
@@ -102,5 +107,12 @@ object Crypto {
         c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(SecurityPolicy.GCM_TAG_BITS, iv))
         if (aad != null) c.updateAAD(aad)
         return c.doFinal(ct)
+    }
+
+    private fun pbkdf2Algorithm(): String {
+        val sdk = android.os.Build.VERSION.SDK_INT
+        return if (sdk == 0 || sdk >= android.os.Build.VERSION_CODES.O)
+            "PBKDF2WithHmacSHA256"
+        else "PBKDF2WithHmacSHA1"
     }
 }

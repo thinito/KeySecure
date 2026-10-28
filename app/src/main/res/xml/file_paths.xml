@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Cache usado para o arquivo de share dos logs -->
+    <cache-path name="cache" path="." />
+    <!-- Logs em getExternalFilesDir(null)/logs/ -->
+    <external-files-path name="external_files" path="." />
+</paths>

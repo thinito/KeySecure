@@ -5,19 +5,17 @@ import kotlinx.serialization.Serializable
 /**
  * Envelope em disco.
  *
- * Versão 5 (atual):
- *  - PIN e frase-chave têm wrappers **ambos** endurecidos com HMAC do
- *    Keystore (pepper). Sem o aparelho, nenhuma das duas credenciais
- *    pode ser testada offline.
- *  - `counter` monotônico para detecção de rollback (best-effort).
- *  - AAD prefixado por papel (`pin|`, `phrase|`, `data|`, `keystore|`).
+ * Versão 5:
+ *  - PIN e frase com pepper (HMAC do Keystore).
+ *  - `counter` monotônico para rollback.
+ *  - AAD prefixado por papel.
  *
- * Versões anteriores:
- *  - v4: pepper só no PIN; frase em PBKDF2 puro.
- *  - v3: pré-pepper, apenas frase abre.
+ * `kdfPhrase` indica o algoritmo usado no embrulho da frase:
+ *  - `"PBKDF2"` (padrão em v5): PBKDF2-HMAC-SHA256.
+ *  - `"ARGON2ID"` (novo): Argon2id com parâmetros de `SecurityPolicy`.
  *
- * `encodeDefaults = true` garante que `version` e `counter` sejam
- * sempre escritos, mesmo quando iguais ao default.
+ * Vaults v5 antigos têm `kdfPhrase = "PBKDF2"`; o upgrade converte para
+ * Argon2id.
  */
 @Serializable
 data class VaultEnvelope(
@@ -30,11 +28,14 @@ data class VaultEnvelope(
     val wrappedKeyPin: String,
     val wrappedKeyPhrase: String,
     val wrappedKeyKeystore: String? = null,
-    val data: String
+    val data: String,
+    val kdfPhrase: String = "PBKDF2"
 ) {
     companion object {
         const val CURRENT_VERSION = 5
         const val MIN_SUPPORTED_VERSION = 3
+        const val KDF_PBKDF2 = "PBKDF2"
+        const val KDF_ARGON2ID = "ARGON2ID"
     }
 }
 

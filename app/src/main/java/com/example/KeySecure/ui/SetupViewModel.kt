@@ -1,13 +1,14 @@
 package com.example.KeySecure.ui
 
 import android.app.Application
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.KeySecure.KeySecureApp
 import com.example.KeySecure.R
 import com.example.KeySecure.UnlockResult
 import com.example.KeySecure.data.SecurityPolicy
+import com.example.KeySecure.util.DicewareGenerator
+import com.example.KeySecure.util.SafeLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +24,8 @@ data class SetupState(
     val error: String? = null,
     val isProcessing: Boolean = false,
     val done: Boolean = false,
-    val pendingBiometricEnroll: Boolean = false
+    val pendingBiometricEnroll: Boolean = false,
+    val pepperSecurityWarning: String? = null
 ) {
     val canSubmit: Boolean
         get() = !isProcessing && !done &&
@@ -34,7 +36,7 @@ data class SetupState(
 class SetupViewModel(app: Application) : AndroidViewModel(app) {
 
     private val keyApp = app as KeySecureApp
-    private val vault = keyApp.vault
+    private val vaultRepository = keyApp.vaultRepository
 
     private val _state = MutableStateFlow(SetupState())
     val state = _state.asStateFlow()
@@ -63,9 +65,6 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(confirmPhrase = v, error = null) }
     }
 
-    // ------------------------------------------------------------------
-    // Create — trabalho pesado em Dispatchers.Default
-    // ------------------------------------------------------------------
     fun create() {
         val s = _state.value
         if (s.isProcessing || s.done) return
@@ -80,16 +79,14 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        // ✅ Marca isProcessing SÍNCRONO antes de lançar — evita duplo toque
-        //    disparar duas derivações de PBKDF2 (600k iterações cada).
         _state.update { it.copy(isProcessing = true, error = null) }
 
         viewModelScope.launch {
             val result: UnlockResult = withContext(Dispatchers.Default) {
                 try {
-                    vault.create(s.pin.toCharArray(), s.phrase.toCharArray())
+                    vaultRepository.create(s.pin.toCharArray(), s.phrase.toCharArray())
                 } catch (t: Throwable) {
-                    Log.e(TAG, "Exceção inesperada em vault.create()", t)
+                    SafeLog.e(TAG, "Exceção inesperada em create()", t)
                     UnlockResult.Failure(t)
                 }
             }
@@ -97,11 +94,14 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
             when (result) {
                 is UnlockResult.Success -> {
                     val available = BiometricHelper.isAvailable(getApplication())
-                    // Reset completo: descarta as Strings de PIN/frase do estado.
+                    val pepperWarning = if (!keyApp.keystore.isPepperHardwareBacked()) {
+                        "Atenção: este dispositivo não tem TEE/StrongBox. O PIN tem proteção apenas de software."
+                    } else null
                     _state.value = SetupState(
                         done = true,
                         isProcessing = false,
-                        pendingBiometricEnroll = available
+                        pendingBiometricEnroll = available,
+                        pepperSecurityWarning = pepperWarning
                     )
                 }
                 is UnlockResult.VaultAlreadyExists -> {
@@ -124,7 +124,7 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 is UnlockResult.Failure -> {
-                    Log.e(TAG, "Falha em vault.create()", result.cause)
+                    SafeLog.e(TAG, "Falha em create()", result.cause)
                     _state.update {
                         it.copy(
                             error = app.getString(R.string.error_create_failed),
@@ -141,6 +141,19 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
+        }
+    }
+
+    fun generateDicewarePhrase(context: android.content.Context) {
+        if (_state.value.isProcessing) return
+        try {
+            val phrase = DicewareGenerator.generate(context, wordCount = 6)
+            _state.update {
+                it.copy(phrase = phrase, confirmPhrase = phrase, error = null)
+            }
+        } catch (t: Throwable) {
+            SafeLog.e(TAG, "Falha ao gerar Diceware", t)
+            _state.update { it.copy(error = "Lista Diceware indisponível") }
         }
     }
 

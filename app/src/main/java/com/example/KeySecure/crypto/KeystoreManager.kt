@@ -2,22 +2,41 @@ package com.example.KeySecure.crypto
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.UserNotAuthenticatedException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.Mac
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
+ * Nível de segurança da chave de pepper, do mais forte para o mais fraco.
+ * `SECURITY_LEVEL_UNKNOWN` é tratado como software (pior caso).
+ */
+enum class PepperSecurityLevel {
+    STRONGBOX,          // HSM dedicado (Titan M, etc.)
+    TRUSTED_ENVIRONMENT, // TEE (ARM TrustZone)
+    SOFTWARE,           // Keystore em software — chave extraível com root
+    UNKNOWN             // Não foi possível determinar — trate como software
+}
+
+/**
  * Android Keystore com duas chaves:
- *  - BIOMETRIC_ALIAS: AES-256-GCM, exige autenticação, envolve a master.
- *  - PEPPER_ALIAS:    HMAC-SHA256, sem autenticação, pimenta o PIN.
+ *  - BIOMETRIC_ALIAS: AES-256-GCM, exige autenticação.
+ *  - PEPPER_ALIAS:    HMAC-SHA256, sem autenticação, mas com:
+ *      • `setUnlockedDeviceRequired(true)` quando API 28+
+ *      • tentativa de StrongBox com fallback para TEE/software
+ *      • verificação de `securityLevel` para detectar software
  *
- * O pepper é o coração da defesa contra força bruta offline:
- * sem a chave HMAC (que nunca sai do TEE/StrongBox), o PBKDF2 do PIN
- * não pode ser testado fora do aparelho.
+ * ⚠️ Em dispositivos com Keystore **software** (sem TEE/StrongBox), a chave
+ * HMAC é extraível com root, e o pepper não oferece proteção real contra
+ * brute force offline. O app deve avisar o usuário nesse caso (ver
+ * `getPepperSecurityLevel()`).
  */
 class KeystoreManager : IKeystore {
 
@@ -33,7 +52,7 @@ class KeystoreManager : IKeystore {
     }
 
     // ------------------------------------------------------------------
-    // Chave biométrica
+    // Chave biométrica (inalterada)
     // ------------------------------------------------------------------
     override fun hasKey(): Boolean = keyStore.containsAlias(BIOMETRIC_ALIAS)
 
@@ -73,24 +92,72 @@ class KeystoreManager : IKeystore {
     }
 
     // ------------------------------------------------------------------
-    // Pepper HMAC
+    // Pepper HMAC — com endurecimento por hardware
     // ------------------------------------------------------------------
     override fun hasPepperKey(): Boolean = keyStore.containsAlias(PEPPER_ALIAS)
 
+    /**
+     * Cria a chave de pepper com o **melhor nível de segurança disponível**,
+     * em ordem decrescente:
+     *
+     *  1. StrongBox + unlockedDeviceRequired (API 28+)
+     *  2. TEE + unlockedDeviceRequired (API 28+)
+     *  3. TEE sem unlockedDeviceRequired (dispositivo sem lock screen seguro)
+     *  4. Software (último recurso — emite aviso via [getPepperSecurityLevel])
+     *
+     * Cada fallback é silencioso do ponto de vista do chamador; o nível
+     * resultante pode ser consultado depois com [getPepperSecurityLevel].
+     */
     override fun createPepperKey() {
         if (hasPepperKey()) return
-        val spec = KeyGenParameterSpec.Builder(
+
+        // Ordem de tentativas: StrongBox → TEE/unlocked → TEE → software.
+        val attempts: List<Pair<Boolean, Boolean>> = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                add(true to true)   // StrongBox + unlockedDeviceRequired
+                add(false to true)  // TEE + unlockedDeviceRequired
+            }
+            add(false to false)     // TEE ou software, sem restrição de unlock
+        }
+
+        var lastError: Throwable? = null
+        for ((strongBox, unlockedRequired) in attempts) {
+            try {
+                generatePepperKey(strongBox, unlockedRequired)
+                return
+            } catch (e: StrongBoxUnavailableException) {
+                lastError = e
+                // StrongBox indisponível ou algoritmo não suportado → tenta próximo
+            } catch (e: UserNotAuthenticatedException) {
+                lastError = e
+                // Dispositivo sem lock screen seguro → tenta sem unlockedDeviceRequired
+            } catch (e: Exception) {
+                lastError = e
+                // Outras falhas (ex.: InvalidAlgorithmParameterException) → tenta próximo
+            }
+        }
+
+        throw IllegalStateException(
+            "Não foi possível criar a chave de pepper com nenhum nível de segurança.",
+            lastError
+        )
+    }
+
+    private fun generatePepperKey(strongBox: Boolean, unlockedRequired: Boolean) {
+        val builder = KeyGenParameterSpec.Builder(
             PEPPER_ALIAS,
             KeyProperties.PURPOSE_SIGN
         )
             .setKeySize(256)
             .setDigests(KeyProperties.DIGEST_SHA256)
-            // SEM setUserAuthenticationRequired(true): queremos que o HMAC
-            // possa ser computado sem prompt, no momento do desbloqueio por PIN.
-            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(strongBox)
+            builder.setUnlockedDeviceRequired(unlockedRequired)
+        }
 
         KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, ANDROID_KEYSTORE)
-            .apply { init(spec) }
+            .apply { init(builder.build()) }
             .generateKey()
     }
 
@@ -104,6 +171,61 @@ class KeystoreManager : IKeystore {
 
     override fun deletePepperKey() {
         if (hasPepperKey()) keyStore.deleteEntry(PEPPER_ALIAS)
+    }
+
+    // ------------------------------------------------------------------
+    // Detecção do nível de segurança da chave de pepper
+    // ------------------------------------------------------------------
+    /**
+     * Retorna o nível de segurança da chave de pepper.
+     *
+     * - API 31+: usa `KeyInfo.securityLevel`.
+     * - API 28–30: usa `KeyInfo.isInsideSecureHardware()` (true = TEE/StrongBox,
+     *   false = software). StrongBox não é distinguível de TEE nessa faixa.
+     * - API 26–27: não há como inspecionar; assume [PepperSecurityLevel.UNKNOWN].
+     *
+     * Retorna `null` se a chave não existir.
+     */
+    override fun getPepperSecurityLevel(): PepperSecurityLevel? {
+        if (!hasPepperKey()) return null
+
+        val key = keyStore.getKey(PEPPER_ALIAS, null) as? SecretKey ?: return null
+        val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+
+        return try {
+            val keyInfo = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                    when (keyInfo.securityLevel) {
+                        KeyProperties.SECURITY_LEVEL_STRONGBOX -> PepperSecurityLevel.STRONGBOX
+                        KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ->
+                            PepperSecurityLevel.TRUSTED_ENVIRONMENT
+                        KeyProperties.SECURITY_LEVEL_SOFTWARE -> PepperSecurityLevel.SOFTWARE
+                        else -> PepperSecurityLevel.UNKNOWN
+                    }
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                    if (keyInfo.isInsideSecureHardware) {
+                        PepperSecurityLevel.TRUSTED_ENVIRONMENT // ou StrongBox, indistinguível
+                    } else {
+                        PepperSecurityLevel.SOFTWARE
+                    }
+                }
+                else -> PepperSecurityLevel.UNKNOWN
+            }
+        } catch (t: Throwable) {
+            PepperSecurityLevel.UNKNOWN
+        }
+    }
+
+    /**
+     * `true` se a chave de pepper está em hardware (StrongBox ou TEE).
+     * Em software ou desconhecido, retorna `false` (trata como inseguro).
+     */
+    fun isPepperHardwareBacked(): Boolean = when (getPepperSecurityLevel()) {
+        PepperSecurityLevel.STRONGBOX,
+        PepperSecurityLevel.TRUSTED_ENVIRONMENT -> true
+        else -> false
     }
 
     // ------------------------------------------------------------------

@@ -50,6 +50,8 @@ import com.example.KeySecure.data.VaultState
 import com.example.KeySecure.ui.*
 import com.example.KeySecure.util.ClipboardUtil
 import com.example.KeySecure.util.filterObscuredTouches
+import com.example.KeySecure.util.DicewareGenerator
+import com.example.KeySecure.util.CrashLogger
 
 class MainActivity : AppCompatActivity() {
 
@@ -320,6 +322,7 @@ private fun SetupScreen(
     val activity = context as? FragmentActivity
     val onObscured = rememberObscuredCallback()
 
+    // Dispara o enrollment biométrico assim que create() sinaliza pronto.
     LaunchedEffect(state.pendingBiometricEnroll) {
         if (state.pendingBiometricEnroll && activity != null) {
             BiometricHelper.promptForEnroll(
@@ -417,6 +420,16 @@ private fun SetupScreen(
                 .fillMaxWidth()
                 .filterObscuredTouches(onObscured)
         )
+        Spacer(Modifier.height(4.dp))
+
+        // 3.1) Botão Diceware — preenche frase e confirmação
+        TextButton(
+            onClick = { vm.generateDicewarePhrase(context) },
+            enabled = !state.isProcessing && !state.done,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(stringResource(R.string.setup_generate_diceware))
+        }
         Spacer(Modifier.height(8.dp))
 
         // 4) Confirmar frase-chave
@@ -440,9 +453,20 @@ private fun SetupScreen(
                 .filterObscuredTouches(onObscured)
         )
 
+        // Aviso de erro (formato, força, mismatch)
         state.error?.let {
             Spacer(Modifier.height(8.dp))
             Text(it, color = MaterialTheme.colorScheme.error)
+        }
+
+        // Aviso de pepper em software (não bloqueia, apenas informa)
+        state.pepperSecurityWarning?.let { warning ->
+            Spacer(Modifier.height(8.dp))
+            Text(
+                warning,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
 
         Spacer(Modifier.height(16.dp))
@@ -493,6 +517,10 @@ private fun VaultScreen(vm: VaultViewModel) {
     var showChangePhrase by remember { mutableStateOf(false) }
     var showUpgrade by remember { mutableStateOf(false) }
     var needsUpgrade by remember { mutableStateOf(false) }
+
+    // ✅ Estados dos diálogos que antes usavam AlertDialog.Builder
+    var showLogPath by remember { mutableStateOf(false) }
+    var showClearLogsConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSettings) {
         if (showSettings) needsUpgrade = vm.needsIterationUpgrade()
@@ -587,6 +615,7 @@ private fun VaultScreen(vm: VaultViewModel) {
         }
     }
 
+    // -------- Diálogo de entrada (add/edit) --------
     if (showEntryDialog) {
         EntryDialog(
             initial = editingEntry,
@@ -613,6 +642,7 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
+    // -------- Confirmação de exclusão --------
     pendingDelete?.let { entry ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
@@ -636,6 +666,7 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
+    // -------- Diálogo de configurações --------
     if (showSettings) {
         AlertDialog(
             onDismissRequest = { showSettings = false },
@@ -680,6 +711,36 @@ private fun VaultScreen(vm: VaultViewModel) {
                             modifier = Modifier.fillMaxWidth()
                         ) { Text(stringResource(R.string.settings_upgrade_iterations)) }
                     }
+
+                    // ✅ Seção de logs — usa estados + AlertDialog do Compose
+                    HorizontalDivider()
+                    Text(
+                        stringResource(R.string.settings_logs_section),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    TextButton(
+                        onClick = {
+                            CrashLogger.shareLogs(context)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(stringResource(R.string.settings_share_logs)) }
+
+                    TextButton(
+                        onClick = {
+                            showSettings = false
+                            showLogPath = true          // ✅ estado, não Builder
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(stringResource(R.string.settings_show_log_path)) }
+
+                    TextButton(
+                        onClick = {
+                            showSettings = false
+                            showClearLogsConfirm = true // ✅ estado, não Builder
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(stringResource(R.string.settings_clear_logs)) }
                 }
             },
             confirmButton = {
@@ -690,6 +751,55 @@ private fun VaultScreen(vm: VaultViewModel) {
         )
     }
 
+    // -------- Mostrar caminho dos logs --------
+    if (showLogPath) {
+        val path = CrashLogger.getLogPath()
+            ?: context.getString(R.string.error_unexpected)
+        AlertDialog(
+            onDismissRequest = { showLogPath = false },
+            title = { Text(stringResource(R.string.settings_log_path_title)) },
+            text = {
+                Text(stringResource(R.string.settings_log_path_hint, path))
+            },
+            confirmButton = {
+                TextButton(onClick = { showLogPath = false }) {
+                    Text(stringResource(R.string.action_close))
+                }
+            }
+        )
+    }
+
+    // -------- Confirmar limpeza dos logs --------
+    if (showClearLogsConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearLogsConfirm = false },
+            title = { Text(stringResource(R.string.settings_clear_logs_confirm)) },
+            text = { Text(stringResource(R.string.settings_clear_logs_message)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    CrashLogger.clearAll()
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.settings_logs_cleared),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    showClearLogsConfirm = false
+                }) {
+                    Text(
+                        stringResource(R.string.settings_clear_logs),
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearLogsConfirm = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+
+    // -------- Trocar PIN --------
     if (showChangePin) {
         ChangePinDialog(vm = vm, onDismiss = { showChangePin = false })
     }
