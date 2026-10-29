@@ -13,75 +13,74 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
-// ---------------------------------------------------------------------------
-// Constantes compartilhadas entre ClipboardUtil e ClipboardClearWorker.
-// Ficam no nível do arquivo (não dentro do object) para que o worker — que
-// é uma classe separada — também possa enxergá-las.
-// `private` no top-level significa "privado a este arquivo", o que é
-// exatamente o escopo desejado.
-// ---------------------------------------------------------------------------
 private const val CLEAR_DELAY_SECONDS = 30L
 private const val WORK_NAME = "clipboard_clear"
-private const val KEY_VALUE_HASH = "value_hash"
+private const val KEY_NONCE = "nonce"
+private const val KEY_IS_SENSITIVE_LEGACY = "android.content.extra.IS_SENSITIVE"
 
-/**
- * String idêntica a `ClipDescription.EXTRA_IS_SENSITIVE` (API 33+),
- * usada como best-effort em APIs 24–32. Muitos teclados/autofill
- * honram essa chave mesmo antes da constante existir.
- */
-private const val EXTRA_IS_SENSITIVE_LEGACY = "android.content.extra.IS_SENSITIVE"
+private val nonceRandom = SecureRandom()
 
 /**
  * Copia senhas para o clipboard e agenda limpeza em 30 s via WorkManager.
  *
- * Por que WorkManager e não Handler:
- *   - O Handler morre junto com o processo. Se o usuário sai do app,
- *     a senha fica no clipboard indefinidamente.
- *   - WorkManager sobrevive à morte do processo, reboot e Doze (com
- *     atraso em Doze — trade-off de bateria × precisão).
+ * Segurança do nonce:
+ *  - Um nonce aleatório de 128 bits é gerado por `SecureRandom`.
+ *  - Ele é armazenado no **label** do `ClipDescription` (campo público,
+ *    sem relação com a senha) e no `Data` do WorkManager.
+ *  - O worker compara o nonce do label com o nonce do `Data`.
+ *  - **Nunca** derivamos nada da senha (nem `hashCode`, nem hash).
+ *    Isso elimina a possibilidade de reverter o valor persistido por
+ *    força bruta, mesmo que o banco do WorkManager seja lido.
  *
- * Limitações conhecidas do Android 10+:
- *   - Em segundo plano, `primaryClip` retorna null para apps comuns.
- *     Por isso o worker **limpa mesmo sem conseguir ler**. É melhor
- *     destruir um clip alheio do que deixar uma senha exposta.
- *   - `clearPrimaryClip()` pode ser um no-op se o app estiver em
- *     background em OEMs agressivos. Best-effort.
+ * Limpeza incondicional:
+ *  - Se o app estiver em segundo plano (API 29+), `primaryClip` retorna
+ *    `null`; o worker **limpa mesmo assim**, sem tentar ler.
+ *  - Se o clip atual não for o nosso (nonce diferente), também limpamos
+ *    por segurança — o pior caso é apagar um clip alheio, o que é
+ *    preferível a deixar uma senha exposta.
  */
 object ClipboardUtil {
 
     /**
-     * Copia [value] para o clipboard marcando como sensível e agenda a
-     * limpeza em 30 s. Chamadas repetidas substituem o agendamento anterior.
+     * Copia [value] para o clipboard, marca como sensível e agenda a
+     * limpeza em 30 s.
      */
     fun copySensitive(context: Context, label: String, value: String) {
         val cm = context.getSystemService<ClipboardManager>() ?: return
-        val clip = ClipData.newPlainText(label, value)
+
+        // Nonce aleatório — 128 bits, sem relação com a senha.
+        val nonce = generateNonce()
+
+        // Label do clip inclui o nonce. O label é visível para o usuário
+        // (aparece em algumas UIs de clipboard), então usamos um prefixo
+        // legível + o nonce.
+        val clipLabel = "KeySecure:$nonce"
+        val clip = ClipData.newPlainText(clipLabel, value)
 
         val extras = PersistableBundle().apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
             } else {
-                // Mesmo valor da constante; honrado como best-effort em API 24-32.
-                putBoolean(EXTRA_IS_SENSITIVE_LEGACY, true)
+                putBoolean(KEY_IS_SENSITIVE_LEGACY, true)
             }
         }
         clip.description.extras = extras
         cm.setPrimaryClip(clip)
 
-        scheduleClear(context, value)
+        scheduleClear(context, nonce, clipLabel)
     }
 
-    /**
-     * Agenda a limpeza. Só passa o `hashCode()` do valor (32 bits, não
-     * reversível) para o WorkManager — nunca a senha em claro.
-     */
-    private fun scheduleClear(context: Context, value: String) {
+    private fun scheduleClear(context: Context, nonce: String, clipLabel: String) {
         val request = OneTimeWorkRequestBuilder<ClipboardClearWorker>()
             .setInitialDelay(CLEAR_DELAY_SECONDS, TimeUnit.SECONDS)
             .setInputData(
-                Data.Builder().putInt(KEY_VALUE_HASH, value.hashCode()).build()
+                Data.Builder()
+                    .putString(KEY_NONCE, nonce)
+                    .putString("clip_label", clipLabel)
+                    .build()
             )
             .build()
 
@@ -92,10 +91,6 @@ object ClipboardUtil {
         )
     }
 
-    /**
-     * Limpa imediatamente e cancela qualquer agendamento pendente.
-     * Útil quando o usuário tranca o cofre manualmente.
-     */
     fun clearNow(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         val cm = context.getSystemService<ClipboardManager>() ?: return
@@ -110,15 +105,28 @@ object ClipboardUtil {
                 @Suppress("DEPRECATION")
                 cm.setPrimaryClip(ClipData.newPlainText("", ""))
             }
-        } catch (t: Throwable) {
-            // Best-effort: em background OEMs podem recusar. Log e segue.
-        }
+        } catch (_: Throwable) { /* best-effort */ }
+    }
+
+    private fun generateNonce(): String {
+        val bytes = ByteArray(16)
+        nonceRandom.nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 }
 
 /**
- * Worker que executa após 30 s. Precisa ser top-level (WorkManager
- * instancia por reflexão) e público.
+ * Worker que executa após 30 s.
+ *
+ * Estratégia de limpeza:
+ *  1. Lê o clip atual.
+ *  2. Se `primaryClip == null` (app em background, API 29+) → **limpa
+ *     incondicionalmente**. Não podemos verificar o nonce, então
+ *     assumimos o pior caso.
+ *  3. Se o clip atual tem o nonce esperado → limpa.
+ *  4. Se o clip atual tem outro nonce → **também limpa** por segurança.
+ *     O usuário pode ter copiado outra coisa, mas é preferível apagar
+ *     um clip alheio a deixar uma senha exposta.
  */
 class ClipboardClearWorker(
     context: Context,
@@ -129,32 +137,37 @@ class ClipboardClearWorker(
         val cm = applicationContext.getSystemService<ClipboardManager>()
             ?: return Result.success()
 
-        val expectedHash = inputData.getInt(KEY_VALUE_HASH, Int.MIN_VALUE)
-        val current = cm.primaryClip
+        val expectedNonce = inputData.getString(KEY_NONCE)
+        val expectedLabel = inputData.getString("clip_label")
 
-        val shouldClear: Boolean = if (current != null && current.itemCount > 0) {
-            // Podemos ler: só limpa se ainda for o valor que colocamos.
-            val text = current.getItemAt(0).text?.toString() ?: ""
-            expectedHash == Int.MIN_VALUE || text.hashCode() == expectedHash
-        } else {
-            // Não conseguimos ler (background em API 29+, ou clip já vazio).
-            // Limpa mesmo assim: preferimos destruir um clip alheio a deixar
-            // uma senha exposta.
-            true
+        val current = runCatching { cm.primaryClip }.getOrNull()
+
+        when {
+            // Não conseguimos ler o clip → limpa incondicionalmente.
+            current == null -> clearClip(cm)
+
+            // Temos o clip, mas o label é diferente do esperado
+            //    (outro app sobrescreveu, ou é o nosso nonce antigo).
+            //    Limpa mesmo assim por segurança.
+            expectedLabel != null && current.description.label != expectedLabel ->
+                clearClip(cm)
+
+            // Nonce bate (ou não conseguimos comparar o label):
+            //    limpa.
+            else -> clearClip(cm)
         }
 
-        if (shouldClear) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    cm.clearPrimaryClip()
-                } else {
-                    @Suppress("DEPRECATION")
-                    cm.setPrimaryClip(ClipData.newPlainText("", ""))
-                }
-            } catch (t: Throwable) {
-                // OEM pode recusar clear em background. Best-effort.
-            }
-        }
         return Result.success()
+    }
+
+    private fun clearClip(cm: ClipboardManager) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                cm.clearPrimaryClip()
+            } else {
+                @Suppress("DEPRECATION")
+                cm.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+        } catch (_: Throwable) { /* best-effort */ }
     }
 }
