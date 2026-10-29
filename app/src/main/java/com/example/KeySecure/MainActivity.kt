@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.clickable
 
 // Compose — material
 import androidx.compose.material.icons.Icons
@@ -84,20 +85,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        LockTimeoutHandler.onActivityStarted(this, keyApp.vault)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        LockTimeoutHandler.onActivityStopped(keyApp.vault)
-    }
-
     override fun onDestroy() {
         super.onDestroy()
         if (isFinishing) {
-            LockTimeoutHandler.onActivityDestroyed(keyApp.vault)
+            keyApp.vault.lock()
         }
     }
 }
@@ -518,7 +509,7 @@ private fun VaultScreen(vm: VaultViewModel) {
     var showUpgrade by remember { mutableStateOf(false) }
     var needsUpgrade by remember { mutableStateOf(false) }
 
-    // ✅ Estados dos diálogos que antes usavam AlertDialog.Builder
+    // Estados dos diálogos que antes usavam AlertDialog.Builder
     var showLogPath by remember { mutableStateOf(false) }
     var showClearLogsConfirm by remember { mutableStateOf(false) }
 
@@ -667,12 +658,16 @@ private fun VaultScreen(vm: VaultViewModel) {
     }
 
     // -------- Diálogo de configurações --------
-    if (showSettings) {
+        if (showSettings) {
+        val currentTimeout by vm.lockTimeout.collectAsStateWithLifecycle()
         AlertDialog(
             onDismissRequest = { showSettings = false },
             title = { Text(stringResource(R.string.settings_title)) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     TextButton(
                         onClick = {
                             vm.resetOpState()
@@ -712,7 +707,30 @@ private fun VaultScreen(vm: VaultViewModel) {
                         ) { Text(stringResource(R.string.settings_upgrade_iterations)) }
                     }
 
-                    // ✅ Seção de logs — usa estados + AlertDialog do Compose
+                    // Seletor de timeout de auto-lock
+                    HorizontalDivider()
+                    Text(
+                        stringResource(R.string.settings_lock_timeout),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    SecurityPolicy.LockTimeout.entries.forEach { timeout ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { vm.setLockTimeout(timeout) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = currentTimeout == timeout,
+                                onClick = { vm.setLockTimeout(timeout) }
+                            )
+                            Text(lockTimeoutLabel(timeout))
+                        }
+                    }
+
+                    // Logs
                     HorizontalDivider()
                     Text(
                         stringResource(R.string.settings_logs_section),
@@ -720,25 +738,17 @@ private fun VaultScreen(vm: VaultViewModel) {
                         color = MaterialTheme.colorScheme.primary
                     )
                     TextButton(
-                        onClick = {
-                            CrashLogger.shareLogs(context)
-                        },
+                        onClick = { CrashLogger.shareLogs(context) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(stringResource(R.string.settings_share_logs)) }
 
                     TextButton(
-                        onClick = {
-                            showSettings = false
-                            showLogPath = true          // ✅ estado, não Builder
-                        },
+                        onClick = { showSettings = false; showLogPath = true },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(stringResource(R.string.settings_show_log_path)) }
 
                     TextButton(
-                        onClick = {
-                            showSettings = false
-                            showClearLogsConfirm = true // ✅ estado, não Builder
-                        },
+                        onClick = { showSettings = false; showClearLogsConfirm = true },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(stringResource(R.string.settings_clear_logs)) }
                 }
@@ -817,9 +827,9 @@ private fun VaultScreen(vm: VaultViewModel) {
 @Composable
 private fun EntryDialog(
     initial: EntryItem?,
-    initialPassword: String?,
+    initialPassword: String?,  // ← String porque OutlinedTextField exige
     onDismiss: () -> Unit,
-    onSave: (name: String, user: String, pass: String) -> Result<Unit>
+    onSave: (name: String, user: String, pass: CharArray) -> Result<Unit>
 ) {
     val onObscured = rememberObscuredCallback()
     var name by remember { mutableStateOf(initial?.name ?: "") }
@@ -834,10 +844,15 @@ private fun EntryDialog(
         if (!canSave) return
         busy = true
         localError = null
-        val result = onSave(name.trim(), user.trim(), pass)
-        result.onFailure { e ->
-            localError = e.message ?: e.javaClass.simpleName
-            busy = false
+        val passChars = pass.toCharArray()
+        try {
+            val result = onSave(name.trim(), user.trim(), passChars)
+            result.onFailure { e ->
+                localError = e.message ?: e.javaClass.simpleName
+                busy = false
+            }
+        } finally {
+            passChars.fill('\u0000')
         }
     }
 
@@ -1161,3 +1176,16 @@ private fun UpgradeIterationsDialog(vm: VaultViewModel, onDismiss: () -> Unit) {
         }
     )
 }
+
+@Composable
+private fun lockTimeoutLabel(timeout: SecurityPolicy.LockTimeout): String =
+    when (timeout) {
+        SecurityPolicy.LockTimeout.IMMEDIATE ->
+            stringResource(R.string.lock_timeout_immediate)
+        SecurityPolicy.LockTimeout.FIFTEEN_SECONDS ->
+            stringResource(R.string.lock_timeout_15s)
+        SecurityPolicy.LockTimeout.THIRTY_SECONDS ->
+            stringResource(R.string.lock_timeout_30s)
+        SecurityPolicy.LockTimeout.ONE_MINUTE ->
+            stringResource(R.string.lock_timeout_1m)
+    }

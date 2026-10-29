@@ -1,102 +1,83 @@
 package com.example.KeySecure
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
-import com.example.KeySecure.data.SecurityPolicy
+import com.example.KeySecure.data.SecurityPolicy.LockTimeout
 
 /**
- * Gerencia o auto-lock do cofre em três frentes:
+ * Auto-lock configurável do cofre quando o app vai para segundo plano.
  *
- *  1. `stoppedAt` (elapsedRealtime) marcado em `onStop`. Em `onStart`,
- *     se `elapsedRealtime() - stoppedAt >= LOCK_TIMEOUT_MS`, tranca.
- *     Usa `elapsedRealtime` (inclui sono profundo) em vez de
- *     `uptimeMillis` (usado por `Handler.postDelayed`).
+ * Estratégia:
+ *  - `onAppBackgrounded` registra `backgroundedAt` (elapsedRealtime) e
+ *    agenda um `Runnable` no `Handler` para `timeout.millis`.
+ *  - `onAppForegrounded` cancela o Handler e, se `elapsedRealtime -
+ *    backgroundedAt >= timeout`, tranca imediatamente (caso o device
+ *    tenha dormido e o Handler não tenha disparado).
+ *  - `timeout.millis == 0` (IMMEDIATE): tranca sem agendar.
  *
- *  2. `BroadcastReceiver` de `ACTION_SCREEN_OFF`, registrado enquanto
- *     a activity está iniciada. Tranca imediatamente ao apagar a tela.
+ * Por que combinar Handler + elapsedRealtime:
+ *  - `Handler.postDelayed` usa `uptimeMillis`, que congela em sono profundo.
+ *  - `elapsedRealtime` avança inclusive em sono profundo.
+ *  - O Handler garante o lock **enquanto o app está em background** (processo
+ *    vivo, UI oculta).
+ *  - A checagem em `onAppForegrounded` cobre o caso "device dormiu e o
+ *    Handler não disparou, mas o tempo real passou".
  *
- *  3. `onActivityDestroyed` (chamado com `isFinishing == true`) tranca
- *     explicitamente, garantindo que a saída do app não deixe a chave
- *     em memória.
- *
- * Compatível com um único `MainActivity` (estado é singleton).
+ * Integração: `KeySecureApp.onCreate` registra um `DefaultLifecycleObserver`
+ * em `ProcessLifecycleOwner` que chama `onAppBackgrounded`/`onAppForegrounded`.
+ * `ProcessLifecycleOwner` já ignora `isChangingConfigurations`, então rotação
+ * de tela não dispara lock.
  */
 object LockTimeoutHandler {
 
-    private var stoppedAt: Long = 0L
+    private val handler = Handler(Looper.getMainLooper())
+    private var pending: Runnable? = null
 
-    private var appContext: Context? = null
-    private var screenOffReceiver: BroadcastReceiver? = null
+    @Volatile private var timeoutMillis: Long = LockTimeout.DEFAULT.millis
+    @Volatile private var backgroundedAt: Long = 0L
 
-    // ------------------------------------------------------------------
-    // Ciclo de vida
-    // ------------------------------------------------------------------
+    /** Atualiza o timeout. Tem efeito no próximo `onAppBackgrounded`. */
+    fun setTimeout(timeout: LockTimeout) {
+        timeoutMillis = timeout.millis
+    }
 
-    /** Chamado em `onStart`. Registra receiver e tranca se o tempo passou. */
-    fun onActivityStarted(context: Context, vault: Vault) {
-        val now = SystemClock.elapsedRealtime()
-        val elapsed = if (stoppedAt > 0L && now >= stoppedAt) {
-            now - stoppedAt
-        } else {
-            0L
-        }
-        stoppedAt = 0L
+    /** Chamado quando o app vai para segundo plano (ProcessLifecycleOwner ON_STOP). */
+    fun onAppBackgrounded(vault: Vault) {
+        cancel()
+        backgroundedAt = SystemClock.elapsedRealtime()
 
-        if (elapsed >= SecurityPolicy.LOCK_TIMEOUT_MS) {
+        if (timeoutMillis == 0L) {
             vault.lock()
+            return
         }
 
-        registerScreenOff(context.applicationContext, vault)
-    }
-
-    /** Chamado em `onStop`. Marca `stoppedAt` e para de receber screen-off. */
-    fun onActivityStopped(vault: Vault) {
-        stoppedAt = SystemClock.elapsedRealtime()
-        unregisterScreenOff()
-    }
-
-    /** Chamado em `onDestroy` quando `isFinishing`. Tranca e limpa. */
-    fun onActivityDestroyed(vault: Vault) {
-        unregisterScreenOff()
-        vault.lock()
-    }
-
-    // ------------------------------------------------------------------
-    // Screen-off receiver
-    // ------------------------------------------------------------------
-
-    private fun registerScreenOff(context: Context, vault: Vault) {
-        if (screenOffReceiver != null) return
-        appContext = context
-        screenOffReceiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                    vault.lock()
-                }
+        val r = Runnable {
+            if (backgroundedAt > 0L &&
+                SystemClock.elapsedRealtime() - backgroundedAt >= timeoutMillis
+            ) {
+                vault.lock()
             }
         }
-        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(
-                screenOffReceiver,
-                filter,
-                Context.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(screenOffReceiver, filter)
+        pending = r
+        handler.postDelayed(r, timeoutMillis)
+    }
+
+    /** Chamado quando o app volta ao primeiro plano (ProcessLifecycleOwner ON_START). */
+    fun onAppForegrounded(vault: Vault) {
+        val bg = backgroundedAt
+        backgroundedAt = 0L
+        cancel()
+
+        // Se o device dormiu durante o background, o Handler não disparou
+        // (uptimeMillis congelou), mas elapsedRealtime avançou. Tranca agora.
+        if (bg > 0L && SystemClock.elapsedRealtime() - bg >= timeoutMillis) {
+            vault.lock()
         }
     }
 
-    private fun unregisterScreenOff() {
-        val ctx = appContext ?: return
-        val r = screenOffReceiver ?: return
-        runCatching { ctx.unregisterReceiver(r) }
-        screenOffReceiver = null
-        appContext = null
+    fun cancel() {
+        pending?.let { handler.removeCallbacks(it) }
+        pending = null
     }
 }

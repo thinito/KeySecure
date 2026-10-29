@@ -4,7 +4,6 @@ import android.os.Build
 import com.example.KeySecure.crypto.Crypto
 import com.example.KeySecure.crypto.IKeystore
 import com.example.KeySecure.crypto.KeystoreManager
-import com.example.KeySecure.crypto.PepperSecurityLevel
 import com.example.KeySecure.data.EntryItem
 import com.example.KeySecure.data.SecurityPolicy
 import com.example.KeySecure.data.VaultEnvelope
@@ -54,11 +53,19 @@ private sealed class EnvelopeResult {
     data class Ok(val envelope: VaultEnvelope) : EnvelopeResult()
 }
 
-/**
- * Função de derivação de bytes injetável.
- * - Produção: Argon2id ou PBKDF2, conforme `kdf`.
- * - Testes JVM: PBKDF2 puro (evita JNI do argon2kt).
- */
+internal data class VaultEntryInMemory(
+    val id: String,
+    val name: String,
+    val user: String,
+    val passCipher: ByteArray,
+    val createdAt: Long,
+    val updatedAt: Long
+) {
+    override fun equals(other: Any?): Boolean =
+        other is VaultEntryInMemory && other.id == id
+    override fun hashCode(): Int = id.hashCode()
+}
+
 typealias DeriveBytesFn = (CharArray, ByteArray, String, Int) -> ByteArray
 
 class Vault(
@@ -78,7 +85,9 @@ class Vault(
 
     @Volatile private var generation: Long = 0L
     @Volatile private var keyBytes: ByteArray? = null
-    @Volatile private var entries: List<VaultEntry> = emptyList()
+
+    /** Entradas em memória: senhas cifradas com a master key. */
+    @Volatile private var entries: List<VaultEntryInMemory> = emptyList()
 
     private val _unlocked = MutableStateFlow(false)
     val unlocked: StateFlow<Boolean> = _unlocked.asStateFlow()
@@ -102,25 +111,34 @@ class Vault(
         "$role|v=${env.version}|c=$counter|ip=${env.iterPin}|iph=${env.iterPhrase}|sp=${env.saltPin}|sph=${env.saltPhrase}|kdf=${env.kdfPhrase}"
             .toByteArray(Charsets.UTF_8)
 
+    /** AAD específico para cifrar a senha individual de uma entrada em RAM. */
+    private fun aadForEntryPass(id: String, env: VaultEnvelope): ByteArray =
+        "entrypass|v=${env.version}|id=$id".toByteArray(Charsets.UTF_8)
+
     // ------------------------------------------------------------------
     // Geração / publicação
     // ------------------------------------------------------------------
     private fun captureGeneration(): Long = lockGuard.withLock { generation }
 
-    private fun publishUnlocked(expectedGen: Long, master: ByteArray, loaded: List<VaultEntry>): Boolean =
-        lockGuard.withLock {
-            if (generation != expectedGen) return@withLock false
-            keyBytes?.fill(0)
-            keyBytes = master.copyOf()
-            entries = loaded
-            _unlocked.value = true
-            true
-        }
+    private fun publishUnlocked(
+        expectedGen: Long,
+        master: ByteArray,
+        loaded: List<VaultEntryInMemory>
+    ): Boolean = lockGuard.withLock {
+        if (generation != expectedGen) return@withLock false
+        keyBytes?.fill(0)
+        keyBytes = master.copyOf()
+        entries = loaded
+        _unlocked.value = true
+        true
+    }
 
     fun lock() = lockGuard.withLock {
         generation++
         keyBytes?.fill(0)
         keyBytes = null
+        // ✅ Zera os ciphertexts individuais antes de descartar
+        entries.forEach { runCatching { it.passCipher.fill(0) } }
         entries = emptyList()
         _unlocked.value = false
     }
@@ -131,7 +149,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Leitura
+    // Leitura de envelope / meta
     // ------------------------------------------------------------------
     private fun readEnvelope(): EnvelopeResult {
         if (!vaultFile.exists()) return EnvelopeResult.Missing
@@ -141,18 +159,13 @@ class Vault(
             if (env.version < VaultEnvelope.MIN_SUPPORTED_VERSION ||
                 env.version > VaultEnvelope.CURRENT_VERSION
             ) {
-                EnvelopeResult.Corrupt(
-                    IllegalArgumentException("Versão não suportada: ${env.version}")
-                )
+                EnvelopeResult.Corrupt(IllegalArgumentException("Versão não suportada: ${env.version}"))
             } else EnvelopeResult.Ok(env)
         } catch (t: Throwable) {
             EnvelopeResult.Corrupt(t)
         }
     }
 
-    // ------------------------------------------------------------------
-    // Meta counter (rollback)
-    // ------------------------------------------------------------------
     private fun readLastSeenCounterLocked(): Long {
         if (!metaFile.exists()) return 0L
         return runCatching { metaFile.readText().trim().toLong() }.getOrDefault(0L)
@@ -192,41 +205,67 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Decode / migração
+    // Decode das entradas (JSON → memória, com senhas re-cifradas)
     // ------------------------------------------------------------------
-    private fun decodeEntries(masterKey: SecretKey, env: VaultEnvelope): List<VaultEntry> {
-        val decrypted = Crypto.decrypt(
-            masterKey, env.data.base64(), aadFor(env, "data", env.counter)
-        )
-        return try {
-            json.decodeFromString(
+    /**
+     * Decodifica o campo `data` do envelope.
+     *
+     * ⚠️ `String(decrypted)` cria uma String temporária com o JSON em claro.
+     * Essa String existe apenas durante este método e é descartada ao final.
+     * Cada `pass` é imediatamente cifrado em `passCipher` antes de sair
+     * deste método, então o JSON decodificado não persiste em memória.
+     */
+    private fun decodeEntries(masterKey: SecretKey, env: VaultEnvelope): List<VaultEntryInMemory> {
+        val decrypted = Crypto.decrypt(masterKey, env.data.base64(), aadFor(env, "data", env.counter))
+        try {
+            val jsonStr = String(decrypted, Charsets.UTF_8)
+            val persisted: List<VaultEntry> = json.decodeFromString(
                 ListSerializer(VaultEntry.serializer()),
-                String(decrypted)
+                jsonStr
             )
+            return persisted.map { e ->
+                val passBytes = e.pass.toByteArray(Charsets.UTF_8)
+                try {
+                    val cipher = Crypto.encrypt(masterKey, passBytes, aadForEntryPass(e.id, env))
+                    VaultEntryInMemory(
+                        id = e.id,
+                        name = e.name,
+                        user = e.user,
+                        passCipher = cipher,
+                        createdAt = e.createdAt,
+                        updatedAt = e.updatedAt
+                    )
+                } finally {
+                    passBytes.fill(0)
+                }
+            }
         } finally {
             decrypted.fill(0)
         }
     }
 
+    // ------------------------------------------------------------------
+    // Migração de ids
+    // ------------------------------------------------------------------
     private fun migrateEntriesIfNeeded(
-        loaded: List<VaultEntry>,
+        loaded: List<VaultEntryInMemory>,
         masterKey: SecretKey,
         env: VaultEnvelope
-    ): Pair<List<VaultEntry>, VaultEnvelope> {
+    ): Pair<List<VaultEntryInMemory>, VaultEnvelope> {
         val now = System.currentTimeMillis()
+        var changed = false
         val migrated = loaded.map { e ->
-            e.copy(
-                id = e.id.ifEmpty { UUID.randomUUID().toString() },
-                createdAt = e.createdAt.takeIf { it != 0L } ?: now,
-                updatedAt = e.updatedAt.takeIf { it != 0L } ?: now
-            )
+            var m = e
+            if (m.id.isEmpty()) { m = m.copy(id = UUID.randomUUID().toString()); changed = true }
+            if (m.createdAt == 0L) { m = m.copy(createdAt = now); changed = true }
+            if (m.updatedAt == 0L) { m = m.copy(updatedAt = now); changed = true }
+            m
         }
-        if (migrated == loaded) return loaded to env
+        if (!changed) return loaded to env
+
         val newCounter = env.counter + 1
         val newEnv = env.copy(counter = newCounter)
-        val body = json.encodeToString(ListSerializer(VaultEntry.serializer()), migrated)
-        val cipher = Crypto.encrypt(masterKey, body.toByteArray(), aadFor(newEnv, "data", newCounter))
-        persistAtomicallyOrThrow(newEnv.copy(data = cipher.toBase64()))
+        persistEntriesOrThrow(migrated, masterKey, newEnv)
         return migrated to newEnv
     }
 
@@ -251,21 +290,6 @@ class Vault(
                 return UnlockResult.Failure(
                     IllegalStateException("Dispositivo não suporta proteção de hardware.", t)
                 )
-            }
-
-            // Aviso se o pepper estiver em software (sem TEE/StrongBox).
-            // O cofre ainda é criado, mas o usuário é informado de que a
-            // proteção do PIN é apenas lógica, não física.
-            val pepperLevel = (keystore as? KeystoreManager)?.getPepperSecurityLevel()
-            if (pepperLevel == PepperSecurityLevel.SOFTWARE ||
-                pepperLevel == PepperSecurityLevel.UNKNOWN
-            ) {
-                SafeLog.w(
-                    TAG,
-                    "Pepper em software ($pepperLevel): PIN não tem proteção de hardware."
-                )
-                // O aviso à UI é feito via VaultRepository/SetupViewModel
-                // (ver observação abaixo).
             }
 
             val startGen = captureGeneration()
@@ -374,13 +398,11 @@ class Vault(
                 UnlockResult.Success
             } else UnlockResult.Aborted
         } catch (e: javax.crypto.AEADBadTagException) {
-            // Credencial errada — não é erro técnico, não loga.
             return UnlockResult.WrongCredential
         } catch (e: IllegalArgumentException) {
             SafeLog.w(TAG, "Envelope inválido no desbloqueio por PIN: ${e.message}")
             return UnlockResult.CorruptedVault
         } catch (e: IllegalStateException) {
-            // Pepper ausente — situação esperada em device reset, não é erro de app.
             return UnlockResult.NoPepper
         } catch (e: GeneralSecurityException) {
             return UnlockResult.WrongCredential
@@ -715,7 +737,7 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // Upgrade de iterações e KDF
+    // Upgrade
     // ------------------------------------------------------------------
     fun needsIterationUpgrade(): Boolean {
         val r = readEnvelope() as? EnvelopeResult.Ok ?: return false
@@ -732,7 +754,7 @@ class Vault(
         return try {
             upgradeIterationsLocked(master, currentPin, currentPhrase)
         } catch (t: Throwable) {
-            SafeLog.e(TAG, "Falha no upgrade de iterações/KDF", t)
+            SafeLog.e(TAG, "Falha no upgrade", t)
             UnlockResult.Failure(t)
         } finally {
             master.fill(0)
@@ -817,33 +839,82 @@ class Vault(
     }
 
     // ------------------------------------------------------------------
-    // CRUD
+    // CRUD — API usa CharArray para pass
     // ------------------------------------------------------------------
     fun getEntrySummaries(): List<EntryItem> = lockGuard.withLock {
         entries.map { EntryItem(it.id, it.name, it.user) }
     }
 
-    fun getEntryPasswordSnapshot(id: String): String? = lockGuard.withLock {
-        entries.firstOrNull { it.id == id }?.pass
+    /**
+     * Decifra a senha da entrada sob demanda. O caller **deve** zerar
+     * o CharArray após usar (`pass.fill('\u0000')`).
+     *
+     * Retorna `null` se o cofre estiver trancado ou a entrada não existir.
+     */
+    fun getEntryPasswordSnapshot(id: String): CharArray? = lockGuard.withLock {
+        try {
+            val entry = entries.firstOrNull { it.id == id } ?: return@withLock null
+            val env = (readEnvelope() as? EnvelopeResult.Ok)?.envelope ?: return@withLock null
+            val passBytes = Crypto.decrypt(key(), entry.passCipher, aadForEntryPass(id, env))
+            try {
+                // String temporária: kotlinx.serialization e OutlinedTextField
+                // exigem String. A referência é descartada ao sair do bloco.
+                String(passBytes, Charsets.UTF_8).toCharArray()
+            } finally {
+                passBytes.fill(0)
+            }
+        } catch (t: Throwable) {
+            SafeLog.e(TAG, "Falha ao decifrar senha da entrada", t)
+            null
+        }
     }
 
-    fun getEntries(): List<VaultEntry> = lockGuard.withLock { entries }
+    /**
+     * @deprecated Acesso à lista com senhas em claro viola o modelo de
+     * segurança. Mantido **apenas** para testes que validam a migração.
+     */
+    @Deprecated("Senhas em claro; use getEntryPasswordSnapshot(id)")
+    fun getEntries(): List<VaultEntry> = lockGuard.withLock {
+        entries.map { e ->
+            val env = (readEnvelope() as? EnvelopeResult.Ok)?.envelope
+            val pass = if (env != null) {
+                val bytes = Crypto.decrypt(key(), e.passCipher, aadForEntryPass(e.id, env))
+                try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) }
+            } else ""
+            VaultEntry(e.id, e.name, e.user, pass, e.createdAt, e.updatedAt)
+        }
+    }
 
-    fun addEntry(name: String, user: String, pass: String): Result<EntryItem> =
+    fun addEntry(name: String, user: String, pass: CharArray): Result<EntryItem> =
         lockGuard.withLock {
             try {
+                val env = when (val r = readEnvelope()) {
+                    is EnvelopeResult.Ok -> r.envelope
+                    is EnvelopeResult.Missing -> throw IOException("Envelope ausente")
+                    is EnvelopeResult.Corrupt -> throw IOException("Envelope ilegível", r.cause)
+                }
                 val now = System.currentTimeMillis()
-                val entry = VaultEntry(
-                    id = UUID.randomUUID().toString(),
+                val id = UUID.randomUUID().toString()
+                val passBytes = String(pass).toByteArray(Charsets.UTF_8)
+                val cipher = try {
+                    Crypto.encrypt(key(), passBytes, aadForEntryPass(id, env))
+                } finally {
+                    passBytes.fill(0)
+                }
+                val entry = VaultEntryInMemory(
+                    id = id,
                     name = name.trim(),
                     user = user.trim(),
-                    pass = pass,
+                    passCipher = cipher,
                     createdAt = now,
                     updatedAt = now
                 )
                 val newList = entries + entry
-                persistEntriesOrThrow(newList)
+                val newCounter = env.counter + 1
+                val newEnv = env.copy(counter = newCounter)
+                persistEntriesOrThrow(newList, key(), newEnv)
                 entries = newList
+                onPersistSuccess(newCounter)
                 Result.success(EntryItem(entry.id, entry.name, entry.user))
             } catch (t: Throwable) {
                 SafeLog.e(TAG, "Falha ao adicionar entrada", t)
@@ -851,24 +922,39 @@ class Vault(
             }
         }
 
-    fun updateEntry(id: String, name: String, user: String, pass: String): Result<Unit> =
+    fun updateEntry(id: String, name: String, user: String, pass: CharArray): Result<Unit> =
         lockGuard.withLock {
             try {
                 val idx = entries.indexOfFirst { it.id == id }
-                if (idx < 0) {
-                    Result.failure(NoSuchElementException("Entrada não encontrada: $id"))
-                } else {
-                    val updated = entries[idx].copy(
-                        name = name.trim(),
-                        user = user.trim(),
-                        pass = pass,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                    val newList = entries.toMutableList().also { it[idx] = updated }
-                    persistEntriesOrThrow(newList)
-                    entries = newList
-                    Result.success(Unit)
+                if (idx < 0) return@withLock Result.failure(
+                    NoSuchElementException("Entrada não encontrada: $id")
+                )
+                val env = when (val r = readEnvelope()) {
+                    is EnvelopeResult.Ok -> r.envelope
+                    is EnvelopeResult.Missing -> throw IOException("Envelope ausente")
+                    is EnvelopeResult.Corrupt -> throw IOException("Envelope ilegível", r.cause)
                 }
+                val passBytes = String(pass).toByteArray(Charsets.UTF_8)
+                val newCipher = try {
+                    Crypto.encrypt(key(), passBytes, aadForEntryPass(id, env))
+                } finally {
+                    passBytes.fill(0)
+                }
+                // ✅ Zera o ciphertext antigo antes de substituir
+                entries[idx].passCipher.fill(0)
+                val updated = entries[idx].copy(
+                    name = name.trim(),
+                    user = user.trim(),
+                    passCipher = newCipher,
+                    updatedAt = System.currentTimeMillis()
+                )
+                val newList = entries.toMutableList().also { it[idx] = updated }
+                val newCounter = env.counter + 1
+                val newEnv = env.copy(counter = newCounter)
+                persistEntriesOrThrow(newList, key(), newEnv)
+                entries = newList
+                onPersistSuccess(newCounter)
+                Result.success(Unit)
             } catch (t: Throwable) {
                 SafeLog.e(TAG, "Falha ao atualizar entrada", t)
                 Result.failure(t)
@@ -877,14 +963,21 @@ class Vault(
 
     fun deleteEntry(id: String): Result<Unit> = lockGuard.withLock {
         try {
-            if (entries.none { it.id == id }) {
-                Result.success(Unit)
-            } else {
-                val newList = entries.filter { it.id != id }
-                persistEntriesOrThrow(newList)
-                entries = newList
-                Result.success(Unit)
+            val target = entries.firstOrNull { it.id == id }
+                ?: return@withLock Result.success(Unit)
+            val env = when (val r = readEnvelope()) {
+                is EnvelopeResult.Ok -> r.envelope
+                is EnvelopeResult.Missing -> throw IOException("Envelope ausente")
+                is EnvelopeResult.Corrupt -> throw IOException("Envelope ilegível", r.cause)
             }
+            target.passCipher.fill(0)  // ✅ zera antes de descartar
+            val newList = entries.filter { it.id != id }
+            val newCounter = env.counter + 1
+            val newEnv = env.copy(counter = newCounter)
+            persistEntriesOrThrow(newList, key(), newEnv)
+            entries = newList
+            onPersistSuccess(newCounter)
+            Result.success(Unit)
         } catch (t: Throwable) {
             SafeLog.e(TAG, "Falha ao excluir entrada", t)
             Result.failure(t)
@@ -894,18 +987,33 @@ class Vault(
     // ------------------------------------------------------------------
     // Persistência
     // ------------------------------------------------------------------
-    private fun persistEntriesOrThrow(newList: List<VaultEntry>) {
-        val env = when (val r = readEnvelope()) {
-            is EnvelopeResult.Ok -> r.envelope
-            is EnvelopeResult.Missing ->
-                throw IOException("Envelope ausente: ${vaultFile.absolutePath}")
-            is EnvelopeResult.Corrupt ->
-                throw IOException("Envelope ilegível", r.cause)
+    /**
+     * ⚠️ Decifra cada `passCipher` para String para montar o JSON.
+     * As Strings existem apenas durante esta chamada e são descartadas
+     * ao final.
+     */
+    private fun persistEntriesOrThrow(
+        newList: List<VaultEntryInMemory>,
+        masterKey: SecretKey,
+        newEnv: VaultEnvelope
+    ) {
+        val entriesForJson = newList.map { e ->
+            val passBytes = Crypto.decrypt(masterKey, e.passCipher, aadForEntryPass(e.id, newEnv))
+            try {
+                VaultEntry(
+                    id = e.id,
+                    name = e.name,
+                    user = e.user,
+                    pass = String(passBytes, Charsets.UTF_8),
+                    createdAt = e.createdAt,
+                    updatedAt = e.updatedAt
+                )
+            } finally {
+                passBytes.fill(0)
+            }
         }
-        val newCounter = env.counter + 1
-        val newEnv = env.copy(counter = newCounter)
-        val body = json.encodeToString(ListSerializer(VaultEntry.serializer()), newList)
-        val cipher = Crypto.encrypt(key(), body.toByteArray(), aadFor(newEnv, "data", newCounter))
+        val body = json.encodeToString(ListSerializer(VaultEntry.serializer()), entriesForJson)
+        val cipher = Crypto.encrypt(masterKey, body.toByteArray(), aadFor(newEnv, "data", newEnv.counter))
         persistAtomicallyOrThrow(newEnv.copy(data = cipher.toBase64()))
     }
 
@@ -942,9 +1050,7 @@ class Vault(
                 if (vaultFile.exists() && !vaultFile.delete()) {
                     throw IOException("Falha ao remover vault.json antigo")
                 }
-                if (!tmp.renameTo(vaultFile)) {
-                    throw IOException("Rename falhou")
-                }
+                if (!tmp.renameTo(vaultFile)) throw IOException("Rename falhou")
             } catch (e2: Exception) {
                 runCatching { tmp.delete() }
                 throw IOException("Falha ao substituir vault.json", e2)

@@ -12,26 +12,19 @@ import javax.crypto.Cipher
 /**
  * Fachada única sobre o [Vault].
  *
- * Responsabilidades:
- *  1. Expor um **único** `StateFlow<VaultState>` (consolida `exists` + `unlocked`).
- *  2. Delegar todas as operações do cofre — ViewModels e UI nunca veem o
- *     [Vault] cru. Isso garante que não há como criar uma segunda instância
- *     por engano.
+ *  - Expõe um único `StateFlow<VaultState>` (consolidando `exists` + `unlocked`).
+ *  - Delega todas as operações do cofre — ViewModels e UI nunca veem o
+ *    [Vault] cru. Isso garante que não há como criar uma segunda instância.
  *
- * A instância de [Vault] é passada pelo `KeySecureApp`; o `VaultRepository`
- * em si é um singleton lá, criado com escopo de aplicação.
+ * Senhas: `addEntry`, `updateEntry` e `getEntryPasswordSnapshot` trabalham
+ * com `CharArray` (zeráveis pelo caller). Strings aparecem apenas
+ * internamente no `Vault`, durante o decode/persist do JSON.
  */
 class VaultRepository(
     private val vault: Vault,
     scope: CoroutineScope
 ) {
 
-    /**
-     * Estado consolidado. Emitido a cada mudança de `vault.exists` ou
-     * `vault.unlocked`. `SharingStarted.Eagerly` inicia a coleta no
-     * momento da criação do repositório, garantindo que a UI sempre
-     * veja o estado mais recente ao se inscrever.
-     */
     val state: StateFlow<VaultState> = combine(
         vault.exists,
         vault.unlocked
@@ -72,7 +65,6 @@ class VaultRepository(
     // Ciclo de vida
     // ==================================================================
     fun lock() = vault.lock()
-
     fun fileExists(): Boolean = vault.fileExists()
 
     // ==================================================================
@@ -102,17 +94,21 @@ class VaultRepository(
         vault.upgradeIterations(pin, phrase)
 
     // ==================================================================
-    // CRUD de entradas — sem segredos
+    // CRUD — pass é CharArray (zerável)
     // ==================================================================
     fun getEntrySummaries(): List<EntryItem> = vault.getEntrySummaries()
 
-    fun getEntryPasswordSnapshot(id: String): String? =
+    /**
+     * Decifra a senha sob demanda. O caller **deve** zerar o CharArray
+     * retornado (`pass.fill('\u0000')`) após o uso.
+     */
+    fun getEntryPasswordSnapshot(id: String): CharArray? =
         vault.getEntryPasswordSnapshot(id)
 
-    fun addEntry(name: String, user: String, pass: String): Result<EntryItem> =
+    fun addEntry(name: String, user: String, pass: CharArray): Result<EntryItem> =
         vault.addEntry(name, user, pass)
 
-    fun updateEntry(id: String, name: String, user: String, pass: String): Result<Unit> =
+    fun updateEntry(id: String, name: String, user: String, pass: CharArray): Result<Unit> =
         vault.updateEntry(id, name, user, pass)
 
     fun deleteEntry(id: String): Result<Unit> = vault.deleteEntry(id)

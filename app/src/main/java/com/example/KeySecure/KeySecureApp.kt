@@ -1,8 +1,12 @@
 package com.example.KeySecure
 
 import android.app.Application
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.KeySecure.crypto.KeystoreManager
 import com.example.KeySecure.data.AttemptTracker
+import com.example.KeySecure.data.LockPreferences
 import com.example.KeySecure.data.VaultRepository
 import com.example.KeySecure.util.CrashLogger
 import kotlinx.coroutines.CoroutineScope
@@ -28,11 +32,37 @@ class KeySecureApp : Application() {
 
     val attemptTracker: AttemptTracker by lazy { AttemptTracker(this) }
 
+    val lockPreferences: LockPreferences by lazy { LockPreferences(this) }
+
     override fun onCreate() {
-        // ANTES de qualquer outra inicialização — captura crashes em
-        // qualquer parte do app, inclusive no resto deste onCreate.
+        super.onCreate()
+
         CrashLogger.install(this)
 
-        super.onCreate()
+        // ✅ Aplica o timeout salvo e registra o observer de processo.
+        LockTimeoutHandler.setTimeout(lockPreferences.getTimeout())
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            LockLifecycleObserver(this)
+        )
+    }
+}
+
+/**
+ * Observa o ciclo de vida do **processo** (não de activities individuais).
+ * `ProcessLifecycleOwner`:
+ *  - Dispara ON_START quando a primeira activity visível inicia.
+ *  - Dispara ON_STOP quando **todas** as activities param — ignorando
+ *    rotação de tela e mudanças de configuração.
+ */
+private class LockLifecycleObserver(
+    private val app: KeySecureApp
+) : DefaultLifecycleObserver {
+
+    override fun onStart(owner: LifecycleOwner) {
+        LockTimeoutHandler.onAppForegrounded(app.vault)
+    }
+
+    override fun onStop(owner: LifecycleOwner) {
+        LockTimeoutHandler.onAppBackgrounded(app.vault)
     }
 }

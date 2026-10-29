@@ -94,6 +94,12 @@
     <string name="action_cancel">Cancelar</string>
     <string name="action_close">Fechar</string>
 
+    <string name="settings_lock_timeout">Travar ao sair do app</string>
+    <string name="lock_timeout_immediate">Imediatamente</string>
+    <string name="lock_timeout_15s">Após 15 segundos</string>
+    <string name="lock_timeout_30s">Após 30 segundos</string>
+    <string name="lock_timeout_1m">Após 1 minuto</string>
+
         <!-- Logs -->
     <string name="settings_logs_section">Logs de diagnóstico</string>
     <string name="settings_share_logs">Compartilhar logs</string>
